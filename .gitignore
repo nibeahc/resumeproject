@@ -1,0 +1,14 @@
+# 사용자 개인정보 보호
+users/*/
+outputs/*/
+
+# 시스템 파일
+.DS_Store
+
+# 빌드 캐시
+.vite/
+
+# 개발 기록 (내부용)
+record/development report*.md
+record/handoff_*.md
+HANDOFF.md

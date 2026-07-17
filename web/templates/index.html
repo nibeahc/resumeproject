@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}대시보드{% endblock %}
+
+{% block content %}
+<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:24px;">
+  <h1 style="margin:0">사용자 목록</h1>
+  <button class="btn btn-primary" onclick="showNewUser()">+ 새 사용자</button>
+</div>
+
+{% if users %}
+<div class="card" style="padding:0; overflow:hidden;">
+  <table>
+    <thead><tr><th>이름</th><th>바로가기</th></tr></thead>
+    <tbody>
+      {% for u in users %}
+      <tr>
+        <td style="font-weight:500">{{ u }}</td>
+        <td>
+          <a href="/user/{{ u }}" class="btn btn-secondary btn-sm">대시보드</a>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="card">
+  <p class="empty">등록된 사용자가 없습니다. 새 사용자를 추가해주세요.</p>
+</div>
+{% endif %}
+
+<!-- New user modal -->
+<div id="modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,.4);
+     z-index:50; align-items:center; justify-content:center;">
+  <div style="background:#fff; border-radius:14px; padding:28px; width:320px;">
+    <h2 style="margin-bottom:16px;">새 사용자 추가</h2>
+    <input id="newName" type="text" placeholder="이름 (예: 채빈)"
+           style="width:100%; padding:10px 12px; border:1px solid #d2d2d7; border-radius:8px;
+                  font-size:14px; margin-bottom:16px;">
+    <div style="display:flex; gap:8px; justify-content:flex-end;">
+      <button class="btn btn-secondary" onclick="closeModal()">취소</button>
+      <button class="btn btn-primary" onclick="createUser()">추가</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function showNewUser() {
+  document.getElementById('modal').style.display = 'flex';
+  document.getElementById('newName').focus();
+}
+function closeModal() {
+  document.getElementById('modal').style.display = 'none';
+}
+async function createUser() {
+  const name = document.getElementById('newName').value.trim();
+  if (!name) return;
+  const fd = new FormData(); fd.append('name', name);
+  const res = await fetch('/new-user', {method:'POST', body:fd}).then(r=>r.json());
+  if (res.success) { window.location = res.redirect; }
+  else { toast(res.error || '오류가 발생했습니다.'); }
+}
+document.getElementById('newName').addEventListener('keydown', e => {
+  if (e.key === 'Enter') createUser();
+  if (e.key === 'Escape') closeModal();
+});
+</script>
+{% endblock %}

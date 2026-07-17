@@ -1,0 +1,181 @@
+{% extends "base.html" %}
+{% block title %}{{ user }} — 대시보드{% endblock %}
+
+{% block content %}
+<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:24px;">
+  <div style="display:flex; align-items:center; gap:12px;">
+    <a href="/" style="color:#6e6e73; font-size:13px;">← 홈</a>
+    <h1 style="margin:0">{{ user }}</h1>
+  </div>
+  <a href="/profile/{{ user }}/setup" class="btn btn-secondary">프로필 수정</a>
+</div>
+
+<div class="tabs">
+  <div class="tab active" data-tab="experiences">경험 DB ({{ experiences|length }})</div>
+  <div class="tab" data-tab="outputs">자소서 결과물 ({{ outputs|length }})</div>
+  <div class="tab" data-tab="upload">파일 업로드</div>
+</div>
+
+<!-- 경험 DB -->
+<div id="tab-experiences">
+  {% if experiences %}
+  <div class="card" style="padding:0; overflow:hidden;">
+    <table>
+      <thead><tr><th>활동명</th><th>시기</th><th></th></tr></thead>
+      <tbody>
+        {% for e in experiences %}
+        <tr>
+          <td>
+            {% if e.warn %}<span class="warn-icon">⚠️</span> {% endif %}
+            <a href="/experience/{{ user }}/{{ e.filename }}">{{ e.name }}</a>
+          </td>
+          <td style="color:#6e6e73; white-space:nowrap;">{{ e.date }}</td>
+          <td><a href="/experience/{{ user }}/{{ e.filename }}" class="btn btn-secondary btn-sm">열기</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="card">
+    <p class="empty">경험 파일이 없습니다. Claude에서 <code>{{ user }} 파싱해줘</code>를 실행해주세요.</p>
+  </div>
+  {% endif %}
+</div>
+
+<!-- 자소서 결과물 -->
+<div id="tab-outputs" style="display:none;">
+  {% if outputs %}
+  <div class="card" style="padding:0; overflow:hidden;">
+    <table>
+      <thead><tr><th>파일명</th><th></th></tr></thead>
+      <tbody>
+        {% for o in outputs %}
+        <tr>
+          <td style="font-weight:500;">{{ o.filename }}</td>
+          <td><a href="/output/{{ user }}/{{ o.filename }}" class="btn btn-secondary btn-sm">열기 / 편집</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="card">
+    <p class="empty">작성된 자소서가 없습니다. Claude에서 자소서 작성을 먼저 실행해주세요.</p>
+  </div>
+  {% endif %}
+</div>
+
+<!-- 파일 업로드 (P4-1) -->
+<div id="tab-upload" style="display:none;">
+  <div class="card">
+    <h2>원본 파일 업로드</h2>
+    <p style="color:#6e6e73; font-size:13px; margin-bottom:20px;">
+      지원 형식: .hwpx .hwp .docx .pdf .md .txt
+    </p>
+
+    <div style="margin-bottom:16px;">
+      <label style="font-size:13px; font-weight:500; display:block; margin-bottom:6px;">폴더 선택</label>
+      <select id="uploadKind" style="padding:8px 12px; border:1px solid #d2d2d7; border-radius:8px; font-size:13px; width:100%;">
+        <option value="apply">apply/ — 자소서, 지원서, 신청서 등</option>
+        <option value="logs">logs/ — 소감문, 활동일지, 결과보고서 등</option>
+      </select>
+    </div>
+
+    <div id="dropzone"
+         style="border:2px dashed #d2d2d7; border-radius:12px; padding:40px; text-align:center;
+                cursor:pointer; transition:border-color .15s, background .15s;"
+         onclick="document.getElementById('fileInput').click()"
+         ondragover="onDragOver(event)"
+         ondragleave="onDragLeave(event)"
+         ondrop="onDrop(event)">
+      <div style="font-size:32px; margin-bottom:8px;">📂</div>
+      <p style="font-weight:500; margin-bottom:4px;">클릭하거나 파일을 여기에 드래그하세요</p>
+      <p style="color:#6e6e73; font-size:12px;">여러 파일 동시 업로드 가능</p>
+    </div>
+    <input id="fileInput" type="file" multiple style="display:none" onchange="uploadFiles(this.files)">
+
+    <div id="uploadResult" style="margin-top:16px; display:none;">
+      <div class="card" style="background:#f5f5f7; border:none; padding:12px 16px;">
+        <div id="uploadMsg" style="font-size:13px;"></div>
+      </div>
+      <p style="margin-top:12px; font-size:13px; color:#1d1d1f;">
+        업로드가 완료됐습니다. Claude에서 <strong><code>{{ user }} 파싱해줘</code></strong>를 실행해 경험 DB를 생성하세요.
+      </p>
+    </div>
+  </div>
+
+  <!-- 현재 원본 파일 목록 -->
+  <div class="card">
+    <h2>현재 원본 파일</h2>
+    <p style="font-size:12px; color:#6e6e73; margin-bottom:8px; font-weight:500;">raw/apply/</p>
+    {% if raw.apply %}
+      <ul style="list-style:none; padding:0; margin-bottom:12px;">
+        {% for f in raw.apply %}
+        <li style="font-size:13px; padding:4px 0; border-bottom:1px solid #f0f0f5;">📄 {{ f }}</li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p class="empty" style="margin-bottom:12px;">파일 없음</p>
+    {% endif %}
+
+    <p style="font-size:12px; color:#6e6e73; margin-bottom:8px; font-weight:500;">raw/logs/</p>
+    {% if raw.logs %}
+      <ul style="list-style:none; padding:0;">
+        {% for f in raw.logs %}
+        <li style="font-size:13px; padding:4px 0; border-bottom:1px solid #f0f0f5;">📄 {{ f }}</li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p class="empty">파일 없음</p>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// tabs
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    ['experiences','outputs','upload'].forEach(id => {
+      document.getElementById('tab-'+id).style.display = id === tab.dataset.tab ? '' : 'none';
+    });
+  });
+});
+
+// upload
+function onDragOver(e) {
+  e.preventDefault();
+  document.getElementById('dropzone').style.borderColor = '#0066cc';
+  document.getElementById('dropzone').style.background = '#f0f5ff';
+}
+function onDragLeave(e) {
+  document.getElementById('dropzone').style.borderColor = '#d2d2d7';
+  document.getElementById('dropzone').style.background = '';
+}
+function onDrop(e) {
+  e.preventDefault();
+  onDragLeave(e);
+  uploadFiles(e.dataTransfer.files);
+}
+
+async function uploadFiles(files) {
+  if (!files.length) return;
+  const kind = document.getElementById('uploadKind').value;
+  const fd = new FormData();
+  fd.append('kind', kind);
+  for (const f of files) fd.append('files', f);
+
+  const res = await fetch('/upload/{{ user }}', {method:'POST', body:fd}).then(r=>r.json());
+
+  const msg = document.getElementById('uploadMsg');
+  if (res.saved.length)   msg.innerHTML += `<p>✅ 업로드 완료: ${res.saved.join(', ')}</p>`;
+  if (res.skipped.length) msg.innerHTML += `<p style="color:#856404">⚠️ 지원하지 않는 형식 (스킵): ${res.skipped.join(', ')}</p>`;
+  document.getElementById('uploadResult').style.display = '';
+  toast(`${res.saved.length}개 파일 업로드 완료`);
+}
+</script>
+{% endblock %}
