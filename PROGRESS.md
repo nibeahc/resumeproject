@@ -17,8 +17,8 @@
 - **날짜**: 2026-09-21
 - **한 일**: 저장소 정리(1.01GB 임시 pack 제거, .git 1.1GB → 164KB),
   자동 점검 스크립트와 git hook 설치, 계획 문서 4종 작성,
-  S0-2 Flask 보안 3종 적용 (사용자명 경로 검증 포함)
-- **다음 할 일**: **S0-3 (SQLite 계층)**. 그 다음 S0-4, 그리고 **S1 시작 전에 S0-5 (Blueprint 분리)**
+  S0-2 Flask 보안 3종 적용 (사용자명 경로 검증 포함), S0-3 SQLite 계층
+- **다음 할 일**: **S0-4 (설정 로더)**. 그 다음 **S1 시작 전에 S0-5 (Blueprint 분리)**
 - **막힌 것**: 없음
 - **결정 사항**: 개인용(로컬 실행, BYOK)으로 먼저 만든다. 호스팅은 추후 과제로 남긴다
 
@@ -30,7 +30,7 @@
 
 - [x] S0-1 저장소 자동 점검 스크립트와 git hook — 2026-09-21
 - [x] S0-2 Flask 보안 3종 (debug, secure_filename, 경로검증) — 2026-09-21 (name 경로 검증 포함, 업로드는 한글 유지 위해 secure_filename 대신 자체 정리 함수)
-- [ ] S0-3 SQLite 계층 (lib/db.py, lib/schema.sql, 5개 테이블)
+- [x] S0-3 SQLite 계층 (lib/db.py, lib/schema.sql, 5개 테이블) — 2026-09-21 (PRAGMA user_version 기반 마이그레이션)
 - [ ] S0-4 설정 로더 (lib/config.py, .env.example)
 - [ ] S0-5 앱 팩토리와 Blueprint 분리 (web/app.py → web/routes/, S1 시작 전에 수행)
 
@@ -121,4 +121,5 @@
 해결되지 않은 문제를 여기 남긴다. 해결되면 지우지 말고 줄을 긋는다.
 
 - S0-2 완료 조건 문구 불일치: ROADMAP 은 `..%2f..%2fClaude.md` 가 400 이라 했으나 라우터가 먼저 404 를 낸다. 파일은 노출되지 않는다. 문구를 "400 또는 404" 로 고칠지 미결정
+- data/app.db 가 iCloud Drive 안에 있다. SQLite 는 iCloud 동기화 중 손상될 수 있으므로, S0-4 에서 DB 경로를 .env 로 바꿀 수 있게 하고 iCloud 밖 경로 사용을 안내한다
 - 호스팅(다중 사용자) 배포는 추후 과제. 필요해지면 ROADMAP S10 과 저장 계층(영구 볼륨, Postgres 검토)부터 다시 설계한다
