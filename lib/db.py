@@ -5,8 +5,8 @@
 import sqlite3
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DB_PATH = PROJECT_ROOT / 'data' / 'app.db'
+from lib import config
+
 SCHEMA_PATH = Path(__file__).resolve().parent / 'schema.sql'
 
 TABLES = ('jobs', 'matches', 'applications', 'application_events', 'documents')
@@ -20,7 +20,7 @@ MIGRATIONS = [
 
 def get_conn(db_path=None):
     """외래키가 켜진 연결을 돌려준다. 행은 이름으로 접근할 수 있다 (row['company'])."""
-    path = Path(db_path) if db_path else DB_PATH
+    path = Path(db_path) if db_path else config.db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
@@ -58,5 +58,5 @@ def list_tables(db_path=None):
 
 if __name__ == '__main__':
     version = init_db()
-    print(f'DB: {DB_PATH} (schema v{version})')
+    print(f'DB: {config.db_path()} (schema v{version})')
     print('tables:', ', '.join(list_tables()))
