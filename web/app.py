@@ -1,6 +1,7 @@
-from flask import Flask, render_template, request, redirect, url_for, jsonify
+from flask import Flask, render_template, request, redirect, url_for, jsonify, abort
 from pathlib import Path
 import re
+import unicodedata
 
 PROJECT_ROOT = Path(__file__).parent.parent
 ALLOWED_EXT = {'.hwpx', '.hwp', '.docx', '.pdf', '.md', '.txt'}
@@ -11,13 +12,50 @@ app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
+_BAD_SEGMENT = re.compile(r'[/\\\x00-\x1f]')
+_BAD_FILENAME_CHARS = re.compile(r'[<>:"|?*\x00-\x1f]')
+
+
+def valid_segment(value):
+    """경로의 한 조각(사용자명, 파일명)으로 쓸 수 있는 문자열인가."""
+    return (
+        isinstance(value, str)
+        and 0 < len(value) <= 100
+        and value not in ('.', '..')
+        and not _BAD_SEGMENT.search(value)
+    )
+
+
+def safe_path(base: Path, *parts) -> Path:
+    """base 밖으로 나가는 경로는 400. 각 조각도 단일 경로 조각이어야 한다."""
+    if not all(valid_segment(x) for x in parts):
+        abort(400)
+    p = base.joinpath(*parts).resolve()
+    if not p.is_relative_to(base.resolve()):
+        abort(400)
+    return p
+
+
+def user_dir(name) -> Path:
+    return safe_path(PROJECT_ROOT / 'users', name)
+
+
+def safe_upload_name(raw):
+    """업로드 파일명 정리. secure_filename 은 한글을 지우므로 쓰지 않고,
+    디렉터리 성분과 위험 문자만 제거한다. 결과가 비면 None."""
+    name = unicodedata.normalize('NFC', raw or '')
+    name = re.split(r'[/\\]', name)[-1]          # 디렉터리 성분 제거
+    name = _BAD_FILENAME_CHARS.sub('', name).strip().lstrip('.')
+    return name if valid_segment(name) else None
+
+
 def get_users():
     d = PROJECT_ROOT / 'users'
     return sorted([p.name for p in d.iterdir() if p.is_dir()]) if d.exists() else []
 
 
 def get_experiences(user):
-    d = PROJECT_ROOT / 'users' / user / 'experiences'
+    d = user_dir(user) / 'experiences'
     if not d.exists():
         return []
     result = []
@@ -31,7 +69,7 @@ def get_experiences(user):
 
 
 def get_outputs(user):
-    d = PROJECT_ROOT / 'outputs' / user
+    d = safe_path(PROJECT_ROOT / 'outputs', user)
     if not d.exists():
         return []
     files = sorted(d.glob('*.md'), key=lambda f: f.stat().st_mtime, reverse=True)
@@ -41,7 +79,7 @@ def get_outputs(user):
 def get_raw_files(user):
     out = {}
     for kind in ('apply', 'logs'):
-        d = PROJECT_ROOT / 'users' / user / 'raw' / kind
+        d = user_dir(user) / 'raw' / kind
         out[kind] = sorted([f.name for f in d.iterdir() if f.is_file()]) if d.exists() else []
     return out
 
@@ -55,6 +93,7 @@ def index():
 
 @app.route('/user/<name>')
 def user_detail(name):
+    user_dir(name)
     return render_template(
         'user.html',
         user=name,
@@ -69,11 +108,13 @@ def new_user():
     name = (request.form.get('name') or '').strip()
     if not name:
         return jsonify(success=False, error='이름을 입력해주세요.')
+    if not valid_segment(name):
+        return jsonify(success=False, error='이름에 사용할 수 없는 문자가 있습니다. (/ \\ .. 등)')
     for sub in ('raw/apply', 'raw/logs', 'experiences'):
-        (PROJECT_ROOT / 'users' / name / sub).mkdir(parents=True, exist_ok=True)
-    (PROJECT_ROOT / 'outputs' / name).mkdir(parents=True, exist_ok=True)
+        (user_dir(name) / sub).mkdir(parents=True, exist_ok=True)
+    safe_path(PROJECT_ROOT / 'outputs', name).mkdir(parents=True, exist_ok=True)
     skeleton = PROJECT_ROOT / 'templates' / 'user-skeleton' / 'profile.md'
-    profile_dest = PROJECT_ROOT / 'users' / name / 'profile.md'
+    profile_dest = user_dir(name) / 'profile.md'
     if skeleton.exists() and not profile_dest.exists():
         profile_dest.write_text(
             skeleton.read_text(encoding='utf-8').replace('[이름]', name),
@@ -83,7 +124,7 @@ def new_user():
 
 
 def parse_profile(name):
-    p = PROJECT_ROOT / 'users' / name / 'profile.md'
+    p = user_dir(name) / 'profile.md'
     if not p.exists():
         return {}
     text = p.read_text(encoding='utf-8')
@@ -115,7 +156,7 @@ def parse_profile(name):
 
 @app.route('/profile/<name>/setup', methods=['GET'])
 def profile_setup(name):
-    if not (PROJECT_ROOT / 'users' / name).exists():
+    if not user_dir(name).exists():
         return redirect(url_for('index'))
     return render_template('setup.html', user=name, profile=parse_profile(name))
 
@@ -148,24 +189,27 @@ def profile_setup_save(name):
 
 ## 가치관 / 성격
 """
-    (PROJECT_ROOT / 'users' / name / 'profile.md').write_text(content, encoding='utf-8')
+    (user_dir(name) / 'profile.md').write_text(content, encoding='utf-8')
     return redirect(url_for('user_detail', name=name))
 
 
 @app.route('/upload/<name>', methods=['POST'])
 def upload(name):
     kind  = request.form.get('kind', 'apply')
+    if kind not in ('apply', 'logs'):
+        abort(400)
     files = request.files.getlist('files')
-    dest  = PROJECT_ROOT / 'users' / name / 'raw' / kind
+    dest  = user_dir(name) / 'raw' / kind
     dest.mkdir(parents=True, exist_ok=True)
 
     saved, skipped = [], []
     for f in files:
         if not f.filename:
             continue
-        if Path(f.filename).suffix.lower() in ALLOWED_EXT:
-            f.save(dest / f.filename)
-            saved.append(f.filename)
+        fname = safe_upload_name(f.filename)
+        if fname and Path(fname).suffix.lower() in ALLOWED_EXT:
+            f.save(safe_path(dest, fname))
+            saved.append(fname)
         else:
             skipped.append(f.filename)
 
@@ -174,7 +218,7 @@ def upload(name):
 
 @app.route('/output/<name>/<filename>')
 def view_output(name, filename):
-    p = PROJECT_ROOT / 'outputs' / name / filename
+    p = safe_path(PROJECT_ROOT / 'outputs', name, filename)
     if not p.exists():
         return '파일을 찾을 수 없습니다.', 404
     return render_template('editor.html', user=name, filename=filename,
@@ -183,14 +227,14 @@ def view_output(name, filename):
 
 @app.route('/output/<name>/<filename>/save', methods=['POST'])
 def save_output(name, filename):
-    p = PROJECT_ROOT / 'outputs' / name / filename
+    p = safe_path(PROJECT_ROOT / 'outputs', name, filename)
     p.write_text(request.json.get('content', ''), encoding='utf-8')
     return jsonify(success=True)
 
 
 @app.route('/experience/<name>/<filename>')
 def view_experience(name, filename):
-    p = PROJECT_ROOT / 'users' / name / 'experiences' / filename
+    p = safe_path(PROJECT_ROOT / 'users', name, 'experiences', filename)
     if not p.exists():
         return '파일을 찾을 수 없습니다.', 404
     return render_template('editor.html', user=name, filename=filename,
@@ -199,10 +243,10 @@ def view_experience(name, filename):
 
 @app.route('/experience/<name>/<filename>/save', methods=['POST'])
 def save_experience(name, filename):
-    p = PROJECT_ROOT / 'users' / name / 'experiences' / filename
+    p = safe_path(PROJECT_ROOT / 'users', name, 'experiences', filename)
     p.write_text(request.json.get('content', ''), encoding='utf-8')
     return jsonify(success=True)
 
 
 if __name__ == '__main__':
-    app.run(debug=True, port=8080)
+    app.run(debug=False, port=8080)
