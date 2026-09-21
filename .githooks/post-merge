@@ -1,0 +1,3 @@
+#!/bin/bash
+# pull/merge 직후 점검 및 자동 복구
+bash "$(git rev-parse --show-toplevel)/scripts/repo-health.sh"

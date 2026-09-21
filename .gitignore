@@ -1,6 +1,7 @@
 # 사용자 개인정보 보호
 users/*/
 outputs/*/
+companies/*.md
 
 # 시스템 파일
 .DS_Store
@@ -12,3 +13,9 @@ outputs/*/
 record/development report*.md
 record/handoff_*.md
 HANDOFF.md
+
+# 서비스 데이터 (ROADMAP S0 이후)
+data/
+jobs/
+*.db
+.env

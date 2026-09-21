@@ -1,0 +1,9 @@
+#!/bin/bash
+# 커밋 직전 점검. 개인정보 누출과 저장소 손상을 커밋 전에 막는다.
+bash "$(git rev-parse --show-toplevel)/scripts/repo-health.sh" --check || {
+  echo ""
+  echo "커밋 중단됨. 위 FAIL 항목을 해결하거나 아래로 자동 복구 후 다시 시도:"
+  echo "  bash scripts/repo-health.sh"
+  echo "정말 무시하려면: git commit --no-verify"
+  exit 1
+}
