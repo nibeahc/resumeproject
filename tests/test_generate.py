@@ -78,6 +78,18 @@ class GeneratePageTest(unittest.TestCase):
         r = self.c.get('/generate/없는사람')
         self.assertEqual(r.status_code, 302)
 
+    def test_renders_candidate_selection_ui(self):
+        """S3-2: 후보 경험 체크박스 영역과 재생성 버튼이 페이지에 있어야 한다."""
+        exp_dir = self.root / 'users' / '홍길동' / 'experiences'
+        exp_dir.mkdir()
+        (exp_dir / 'a.md').write_text('x', encoding='utf-8')
+        r = self.c.get('/generate/홍길동')
+        body = r.get_data(as_text=True)
+        self.assertIn('id="candidatesBox"', body)
+        self.assertIn('id="candList"', body)
+        self.assertIn('id="regenBtn"', body)
+        self.assertIn('onclick="regenerate()"', body)
+
 
 class GenerateRouteTest(unittest.TestCase):
     def setUp(self):

@@ -34,6 +34,15 @@
   .char-badge { font-size:12px; font-weight:600; padding:3px 10px; border-radius:99px; }
   .char-ok { background:#d1e7dd; color:#0a3622; }
   .char-over { background:#f8d7da; color:#842029; }
+
+  #candidatesBox { display:none; }
+  .cand-item { display:flex; gap:10px; padding:10px 4px; border-bottom:1px solid #f0f0f5; }
+  .cand-item:last-child { border-bottom:none; }
+  .cand-item input[type=checkbox] { margin-top:3px; flex:none; }
+  .cand-title { font-size:13px; font-weight:500; }
+  .cand-score { font-size:11px; color:#6e6e73; font-weight:400; margin-left:6px; }
+  .cand-reasons { font-size:12px; color:#6e6e73; margin-top:2px; }
+  .cand-used { background:#f0f7ff; border-radius:8px; }
 </style>
 
 <div style="margin-bottom:20px; font-size:13px; color:#6e6e73;">
@@ -120,9 +129,26 @@
     <div class="answer-text" id="answerText"></div>
     <div class="meta-text" id="metaText"></div>
   </div>
-  <div style="display:flex; justify-content:space-between; align-items:center;">
+  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
     <a href="#" id="savedLink" class="btn btn-secondary">저장된 파일 열기 / 편집 →</a>
     <button class="btn btn-secondary" onclick="resetForm()">다른 문항 작성</button>
+  </div>
+</div>
+
+<!-- 경험 선택 (S3-2). lib/selector.py 가 고른 후보와 이유를 보여주고, 체크박스로 바꿔 재생성할 수 있다. -->
+<div id="candidatesBox">
+  <div class="card">
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:4px;">
+      <h2 style="margin:0">사용한 경험</h2>
+      <span id="questionTypeBadge" style="font-size:11px; color:#6e6e73;"></span>
+    </div>
+    <p style="font-size:12px; color:#6e6e73; margin-bottom:10px;">
+      체크박스를 바꿔서 다른 경험으로 다시 써볼 수 있습니다 (최대 2개).
+    </p>
+    <div id="candList"></div>
+    <div style="display:flex; justify-content:flex-end; margin-top:12px;">
+      <button class="btn btn-primary btn-sm" id="regenBtn" onclick="regenerate()">선택한 경험으로 재생성 →</button>
+    </div>
   </div>
 </div>
 {% endblock %}
@@ -159,7 +185,11 @@ const STAGE_LABEL = {
   generating: '작성 중...',
   draft: '초안 완료',
   retry: '글자수 보정 중...',
+  selected: '경험 선택 완료',
 };
+
+let lastSelection = null;   // 마지막 'selected' 진행 이벤트 (question_type, selected, candidates)
+let lastQuestion = '';      // 재생성 시 결과 카드 제목에 다시 쓴다
 
 function logLine(text) {
   const log = document.getElementById('progressLog');
@@ -171,7 +201,7 @@ function logLine(text) {
   log.scrollTop = log.scrollHeight;
 }
 
-async function generate() {
+async function generate(overrideFiles) {
   const company = document.getElementById('company').value.trim();
   const position = document.getElementById('position').value.trim();
   const question = document.getElementById('question').value.trim();
@@ -183,28 +213,36 @@ async function generate() {
     return;
   }
 
-  document.getElementById('genBtn').disabled = true;
+  const genBtn = document.getElementById('genBtn');
+  const regenBtn = document.getElementById('regenBtn');
+  genBtn.disabled = true;
+  if (regenBtn) regenBtn.disabled = true;
   document.getElementById('progressBox').style.display = '';
   document.getElementById('resultBox').style.display = 'none';
+  document.getElementById('candidatesBox').style.display = 'none';
   document.getElementById('progressLog').innerHTML = '';
   document.getElementById('spinner').style.display = '';
-  document.getElementById('progressTitle').textContent = '생성 중...';
+  document.getElementById('progressTitle').textContent = overrideFiles ? '재생성 중...' : '생성 중...';
 
   try {
+    const body = { company, position, question, char_limit: charLimit, count_mode: countMode };
+    if (overrideFiles && overrideFiles.length) body.experience_files = overrideFiles;
+
     const res = await fetch('/generate/{{ user }}', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        company, position, question,
-        char_limit: charLimit, count_mode: countMode,
-      }),
+      body: JSON.stringify(body),
     });
 
     let doneData = null, errorMsg = null;
     await consumeSSE(res, (ev, data) => {
       if (ev === 'progress') {
         const label = STAGE_LABEL[data.stage] || data.stage;
-        if (data.stage === 'retry') logLine(`⚠️ ${label} (${data.diff > 0 ? data.diff + '자 초과' : Math.abs(data.diff) + '자 부족'})`);
+        if (data.stage === 'selected') {
+          lastSelection = data;
+          logLine(`${label}: ${data.selected.map(s => s.title).join(', ')}`);
+        }
+        else if (data.stage === 'retry') logLine(`⚠️ ${label} (${data.diff > 0 ? data.diff + '자 초과' : Math.abs(data.diff) + '자 부족'})`);
         else if (data.stage === 'draft') logLine(`${label} — ${data.chars}자`);
         else logLine(label);
       } else if (ev === 'done') {
@@ -214,7 +252,8 @@ async function generate() {
       }
     });
 
-    document.getElementById('genBtn').disabled = false;
+    genBtn.disabled = false;
+    if (regenBtn) regenBtn.disabled = false;
     document.getElementById('progressBox').style.display = 'none';
 
     if (errorMsg) {
@@ -225,9 +264,13 @@ async function generate() {
       toast('생성 결과를 받지 못했습니다.', 4000);
       return;
     }
+    lastQuestion = question;
     showResult(question, doneData);
+    if (lastSelection) showCandidates(lastSelection, doneData.used_experiences);
+    toast(overrideFiles ? '재생성 완료' : '자소서 생성 완료');
   } catch (e) {
-    document.getElementById('genBtn').disabled = false;
+    genBtn.disabled = false;
+    if (regenBtn) regenBtn.disabled = false;
     document.getElementById('progressBox').style.display = 'none';
     toast('요청 중 오류가 발생했습니다: ' + e.message, 4000);
   }
@@ -255,12 +298,74 @@ function showResult(question, data) {
   document.getElementById('savedLink').href = `/output/{{ user }}/${encodeURIComponent(filename)}`;
 
   document.getElementById('resultBox').style.display = '';
-  toast('자소서 생성 완료');
+}
+
+// S3-2: 후보 경험 체크박스 + 선택 근거. usedFilenames 는 이번에 실제로 쓰인 경험(코드가 확정한 값,
+// data.used_experiences) — candidates 목록엔 없던 경험이 override 로 쓰였을 수도 있어서 함께 표시한다.
+function showCandidates(selection, usedFilenames) {
+  const box = document.getElementById('candidatesBox');
+  const list = document.getElementById('candList');
+  list.innerHTML = '';
+
+  document.getElementById('questionTypeBadge').textContent = `문항 유형: ${selection.question_type}`;
+
+  const usedSet = new Set(usedFilenames || []);
+  let candidates = selection.candidates.slice();
+  // 후보 목록(상위 6개)에 없어도 실제로 쓰인 경험(override)은 체크박스에 보여야 한다
+  for (const s of selection.selected) {
+    if (!candidates.some(c => c.filename === s.filename)) candidates.unshift(s);
+  }
+
+  for (const c of candidates) {
+    const row = document.createElement('label');
+    row.className = 'cand-item' + (usedSet.has(c.filename) ? ' cand-used' : '');
+    const reasonsText = c.reasons.length ? c.reasons.join(' · ') : '뚜렷한 근거 없음 (낮은 우선순위)';
+    row.innerHTML = `
+      <input type="checkbox" value="${escapeAttr(c.filename)}" ${usedSet.has(c.filename) ? 'checked' : ''}
+             onchange="enforceMaxTwoChecked(this)">
+      <div>
+        <div class="cand-title">${escapeHtml(c.title)}<span class="cand-score">점수 ${c.score}</span></div>
+        <div class="cand-reasons">${escapeHtml(reasonsText)}</div>
+      </div>
+    `;
+    list.appendChild(row);
+  }
+  box.style.display = '';
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+function escapeAttr(s) {
+  return escapeHtml(s).replace(/"/g, '&quot;');
+}
+
+// Step 7 원칙: 활동 최대 2개. 3번째를 체크하면 이번에 체크한 것 대신 안내만 하고 되돌린다.
+function enforceMaxTwoChecked(changed) {
+  const boxes = Array.from(document.querySelectorAll('#candList input[type=checkbox]'));
+  const checked = boxes.filter(b => b.checked);
+  if (checked.length > 2) {
+    changed.checked = false;
+    toast('경험은 최대 2개까지 선택할 수 있습니다.');
+  }
+}
+
+function regenerate() {
+  const files = Array.from(document.querySelectorAll('#candList input[type=checkbox]:checked')).map(b => b.value);
+  if (!files.length) {
+    toast('최소 1개는 선택해야 합니다.');
+    return;
+  }
+  document.getElementById('question').value = lastQuestion;
+  generate(files);
 }
 
 function resetForm() {
   document.getElementById('question').value = '';
   document.getElementById('resultBox').style.display = 'none';
+  document.getElementById('candidatesBox').style.display = 'none';
   document.getElementById('question').focus();
 }
 </script>
