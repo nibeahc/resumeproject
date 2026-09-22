@@ -17,8 +17,9 @@
 - **날짜**: 2026-09-21
 - **한 일**: 저장소 정리(1.01GB 임시 pack 제거, .git 1.1GB → 164KB),
   자동 점검 스크립트와 git hook 설치, 계획 문서 4종 작성,
-  S0-2 Flask 보안 3종 적용 (사용자명 경로 검증 포함), S0-3 SQLite 계층, S0-4 설정 로더
-- **다음 할 일**: **S0-5 (앱 팩토리와 Blueprint 분리)**. 끝나면 S1-1 (LLM 레이어). S1 에서 ANTHROPIC_API_KEY 가 필요하다
+  S0-2 Flask 보안 3종 적용 (사용자명 경로 검증 포함), S0-3 SQLite 계층, S0-4 설정 로더,
+  S0-5 앱 팩토리와 Blueprint 분리 (S0 전체 완료)
+- **다음 할 일**: **S1-1 (LLM 레이어)**. 착수 전에 .env 에 ANTHROPIC_API_KEY 를 직접 넣어야 한다 (`python3 -m lib.config` 로 확인)
 - **막힌 것**: 없음
 - **결정 사항**: 개인용(로컬 실행, BYOK)으로 먼저 만든다. 호스팅은 추후 과제로 남긴다
 
@@ -32,7 +33,7 @@
 - [x] S0-2 Flask 보안 3종 (debug, secure_filename, 경로검증) — 2026-09-21 (name 경로 검증 포함, 업로드는 한글 유지 위해 secure_filename 대신 자체 정리 함수)
 - [x] S0-3 SQLite 계층 (lib/db.py, lib/schema.sql, 5개 테이블) — 2026-09-21 (PRAGMA user_version 기반 마이그레이션)
 - [x] S0-4 설정 로더 (lib/config.py, .env.example) — 2026-09-21 (DB_PATH 도 .env 로 지정 가능, `python3 -m lib.config` 로 점검)
-- [ ] S0-5 앱 팩토리와 Blueprint 분리 (web/app.py → web/routes/, S1 시작 전에 수행)
+- [x] S0-5 앱 팩토리와 Blueprint 분리 (web/app.py → web/routes/, tests/ 회귀 테스트 16개) — 2026-09-21
 
 ### S1. 생성 엔진 웹 이관 — 서비스화의 단일 병목
 

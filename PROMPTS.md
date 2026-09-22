@@ -116,7 +116,9 @@ CLI 와 웹이 같은 스킬 파일 한 벌을 공유해야 한다.
 ```text
 ROADMAP.md 의 S1-2 를 수행해줘.
 
-web/app.py 에 POST /parse/<user> 를 추가한다.
+web/routes/parse.py (Blueprint) 에 POST /parse/<user> 를 추가하고
+web/routes/__init__.py 의 register_blueprints 에 등록한다.
+경로를 만들 때는 web/paths.py 의 user_dir(), safe_path() 를 쓴다.
 raw/ 파일을 읽어 skills/parse-experiences.md 로 파싱하고
 experiences/ 에 저장한다. 진행 상황을 스트리밍으로 보여줄 것.
 
@@ -128,7 +130,8 @@ experiences/ 에 저장한다. 진행 상황을 스트리밍으로 보여줄 것
 ```text
 ROADMAP.md 의 S1-3 을 수행해줘.
 
-web/app.py 에 POST /generate/<user> 를 추가한다.
+web/routes/generate.py (Blueprint) 에 POST /generate/<user> 를 추가하고 등록한다.
+경로를 만들 때는 web/paths.py 의 user_dir(), output_dir(), safe_path() 를 쓴다.
 입력은 문항, 글자수, 기업명, 직무명.
 skills/write-coverletter.md 의 Step 1~10 을 수행하고 outputs/ 에 저장한다.
 
@@ -213,7 +216,7 @@ raw 파일이 하나도 없어도 대화만으로 경험 DB 를 만들 수 있�
 5. 한 세션에 경험 1~2개까지
 
 기존 skills/*.md 의 문서 구조와 톤을 그대로 따라줘.
-그 다음 POST /elicit/<user> 와 web/templates/elicit.html 로 웹 UI 를 만든다.
+그 다음 web/routes/elicit.py 의 POST /elicit/<user> 와 web/templates/elicit.html 로 웹 UI 를 만든다.
 
 완료 후 테스트용 신규 유저를 만들어 실제로 경험 1개를 대화로 뽑아보고,
 STAR 5항목 중 몇 개가 채워졌는지 보고해줘.

@@ -144,6 +144,20 @@ pre-commit 에서 `--check` 모드로 돌아 문제가 있으면 커밋을 막�
 - `.env` 는 gitignore 됨. `.env.example` 만 커밋
 - **완료 조건**: 키 누락 시 명확한 에러 메시지로 종료
 
+#### S0-5. 앱 팩토리와 Blueprint 분리
+- **대상**: `web/` (S1 시작 전에 수행. 이후 라우트가 계속 늘어나기 때문)
+- 구조
+  ```text
+  web/app.py          진입점 (create_app() 호출)
+  web/__init__.py     create_app(config=None), PROJECT_ROOT 는 app.config 에서 읽는다
+  web/paths.py        경로 보안 헬퍼 (safe_path, user_dir, output_dir, safe_upload_name)
+  web/data.py         화면용 읽기 헬퍼
+  web/routes/         Blueprint 별 파일 (main, profile, documents, 이후 parse, generate, ...)
+  tests/              python3 -m unittest discover -s tests -v
+  ```
+- 규칙: 사용자 입력이 들어가는 경로는 `web/paths.py` 헬퍼로만 만든다. 새 Blueprint 는 `web/routes/__init__.py` 의 `register_blueprints` 에 등록한다
+- **완료 조건**: 분리 전후 라우트 표가 같고, S0-2 보안 회귀 테스트(`tests/test_web_security.py`)가 통과하며, `web/run.sh` 로 기동된다
+
 ---
 
 ### S1. 생성 엔진 웹 이관 (핵심)
@@ -155,13 +169,13 @@ pre-commit 에서 `--check` 모드로 돌아 문제가 있으면 커밋을 막�
 - **완료 조건**: `skills/write-coverletter.md` 를 로드해 자소서 1건 생성 성공
 
 #### S1-2. 파싱 라우트
-- **대상**: `web/app.py` `POST /parse/<user>`
+- **대상**: `web/routes/parse.py` `POST /parse/<user>` (S0-5 의 Blueprint 구조)
 - `raw/` 파일 → `skills/parse-experiences.md` → `experiences/`
 - 진행 상황 스트리밍 (SSE 또는 청크 응답)
 - **완료 조건**: 터미널 없이 웹에서 파싱 완료
 
 #### S1-3. 생성 라우트
-- **대상**: `web/app.py` `POST /generate/<user>`
+- **대상**: `web/routes/generate.py` `POST /generate/<user>`
 - 입력: 문항, 글자수, 기업명, 직무명
 - `skills/write-coverletter.md` Step 1~10 수행 → `outputs/` 저장
 - **글자수 검증을 코드로** 한다. 초과 시 재시도 1회
@@ -222,7 +236,7 @@ pre-commit 에서 `--check` 모드로 돌아 문제가 있으면 커밋을 막�
 - **완료 조건**: raw 파일이 하나도 없는 신규 유저로 경험 1개 생성, STAR 5항목 중 4개 이상 충족
 
 #### S3-4. 대화형 발굴 웹 UI
-- **대상**: `web/app.py` `POST /elicit/<user>`, `web/templates/elicit.html` (신규)
+- **대상**: `web/routes/elicit.py` `POST /elicit/<user>`, `web/templates/elicit.html` (신규)
 - 채팅 형태. 확정된 경험은 우측에 카드로 누적
 - **완료 조건**: 브라우저만으로 경험 발굴 완주
 
