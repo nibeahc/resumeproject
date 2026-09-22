@@ -6,6 +6,11 @@ companies/*.md
 # 시스템 파일
 .DS_Store
 
+# 파이썬
+__pycache__/
+*.pyc
+.venv/
+
 # 빌드 캐시
 .vite/
 
