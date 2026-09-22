@@ -25,6 +25,7 @@ EXPECTED_ROUTES = {
     ('/output/<name>/<filename>/save', 'POST'),
     ('/experience/<name>/<filename>', 'GET'),
     ('/experience/<name>/<filename>/save', 'POST'),
+    ('/parse/<name>', 'POST'),
     ('/static/<path:filename>', 'GET'),
 }
 

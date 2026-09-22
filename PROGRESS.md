@@ -15,10 +15,27 @@
 ## 마지막 세션
 
 - **날짜**: 2026-09-21
-- **한 일**: S0 전체 완료(저장소 정리, 보안, SQLite, 설정 로더, Blueprint 분리),
-  S1-1 LLM 레이어 (lib/llm.py, lib/skills.py) 구현 및 실제 생성 테스트
-- **다음 할 일**: **S1-2 (파싱 라우트)**
+- **한 일**: S0 전체 완료, S1-1 LLM 레이어, S1-2 파싱 라우트 (web/routes/parse.py)
+- **다음 할 일**: **S1-3 (생성 라우트)**
 - **막힌 것**: 없음
+- **S1-2 설계 메모 — 원본 스킬의 대화형 확인 3곳을 자동화함** (되돌리고 싶으면 web/routes/parse.py 상단 docstring 참고):
+  1. 재파싱 여부 → experiences/ 가 있으면 거부, force=1 필요 (신규 파일만 추가하는 기능은 없음. 전체 재파싱만)
+  2. 오래된 경험 → 항상 포함 + "⚠️ 오래된 경험" 태그만 붙임. 확인은 write-coverletter 생성 시점으로 이미 넘어가 있음
+  3. 관심직무.md 추론 → 비어 있으면 자동 초안 생성
+- **S1-2 구현 중 발견/수정한 문제**:
+  - 처음엔 templates/experience-entry.md 를 프롬프트에 실제로 첨부하지 않아서, 모델이 자기 나름의
+    STAR 변형(Task 항목 추가, STAR 품질 체크 누락)을 썼다. 템플릿 원문을 프롬프트에 그대로 넣고 나서야
+    Situation/Action/Result + 체크리스트가 템플릿과 정확히 일치했다. → **새 파일 형식을 프롬프트로 시킬 때는
+    "~형식으로" 라고 말로 설명하지 말고 템플릿 원문을 반드시 첨부할 것** (S1-3, S3 등에도 적용)
+  - 처음 구현은 llm_start 와 llm_done 사이(실측 40~50초)에 아무 신호가 없어 "멈춘 것처럼" 보였다.
+    stream_complete 의 on_delta 를 큐로 받아 약 400자마다 "generating" 진행 이벤트를 보내도록 고침
+  - lib/skills.py 는 건드리지 않음 (1-B 원칙 유지) — parse-experiences.md 원문은 그대로 system 프롬프트로 사용
+- **S1-2 알려진 한계 (다음 사람이 볼 것)**:
+  - .hwp, .pdf 추출 미지원 (S2 lib/extract.py 예정). 지금은 .md/.txt/.docx/.hwpx 만 처리
+  - 신규 파일만 골라 추가 파싱하는 기능 없음 (raw 파일 ↔ experience 파일 매핑 기록이 아직 없음)
+  - 관심직무.md 자동 생성 시 마지막 섹션 헤더가 가끔 "이 직무에서 강조할 경험 유형" 대신
+    "이 경험에서 강조할 경험 유형"으로 나옴 (기능엔 영향 없는 사소한 표현 오차)
+  - 라우트만 있고 버튼/화면은 없음 (S1-4 에서 연결)
 - **주의**: claude-sonnet-5 는 요청하지 않아도 thinking 을 켤 때가 있다. thinking 이 max_tokens 를 전부
   써버리면 답변 텍스트가 0자로 나온다 (실측: input 8772 / max_tokens 4000 전부 thinking 소진, stop_reason=max_tokens).
   lib/llm.py 의 stream_complete() 는 기본으로 thinking 을 끈다 (thinking={"type":"disabled"}).
@@ -42,7 +59,7 @@
 ### S1. 생성 엔진 웹 이관 — 서비스화의 단일 병목
 
 - [x] S1-1 LLM 레이어 (lib/llm.py, lib/skills.py) — 2026-09-22 (채빈/CJ대한통운/글로벌SCM 지원동기 800자 실제 생성 확인)
-- [ ] S1-2 파싱 라우트 (POST /parse/<user>)
+- [x] S1-2 파싱 라우트 (POST /parse/<user>) — 2026-09-22 (샌드박스 테스트유저로 웹 요청 검증, 실제 채빈/김혜린 데이터는 건드리지 않음)
 - [ ] S1-3 생성 라우트 (POST /generate/<user>, 글자수 코드 검증)
 - [ ] S1-4 생성 UI (generate.html)
 - [ ] **마일스톤: 브라우저만으로 업로드 → 파싱 → 자소서 생성 완주**
