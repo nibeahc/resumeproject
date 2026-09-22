@@ -44,6 +44,41 @@ class ParseAnswerTest(unittest.TestCase):
         self.assertEqual((answer, meta), ('', ''))
 
 
+class GeneratePageTest(unittest.TestCase):
+    """S1-4: GET /generate/<name> 페이지 렌더링."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.root = self.tmp / 'root'
+        (self.root / 'users' / '홍길동').mkdir(parents=True)
+        app = create_app({'PROJECT_ROOT': self.root, 'TESTING': True})
+        self.c = app.test_client()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_renders_with_no_experiences(self):
+        r = self.c.get('/generate/홍길동')
+        self.assertEqual(r.status_code, 200)
+        body = r.get_data(as_text=True)
+        self.assertIn('아직 경험 DB가 없습니다', body)
+        self.assertIn('id="genBtn"', body)
+        self.assertIn('onclick="generate()" disabled', body)  # 버튼 태그 자체가 비활성화되어야 함
+
+    def test_renders_with_experiences_enabled(self):
+        exp_dir = self.root / 'users' / '홍길동' / 'experiences'
+        exp_dir.mkdir()
+        (exp_dir / 'a.md').write_text('x', encoding='utf-8')
+        r = self.c.get('/generate/홍길동')
+        body = r.get_data(as_text=True)
+        self.assertIn('경험 1개를 바탕으로', body)
+        self.assertNotIn('onclick="generate()" disabled', body)  # 버튼이 활성화되어 있어야 함
+
+    def test_unknown_user_redirects_home(self):
+        r = self.c.get('/generate/없는사람')
+        self.assertEqual(r.status_code, 302)
+
+
 class GenerateRouteTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())

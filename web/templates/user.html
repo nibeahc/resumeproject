@@ -2,12 +2,18 @@
 {% block title %}{{ user }} — 대시보드{% endblock %}
 
 {% block content %}
+<style>
+  @keyframes spin { to { transform:rotate(360deg); } }
+</style>
 <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:24px;">
   <div style="display:flex; align-items:center; gap:12px;">
     <a href="/" style="color:#6e6e73; font-size:13px;">← 홈</a>
     <h1 style="margin:0">{{ user }}</h1>
   </div>
-  <a href="/profile/{{ user }}/setup" class="btn btn-secondary">프로필 수정</a>
+  <div style="display:flex; gap:8px;">
+    <a href="/profile/{{ user }}/setup" class="btn btn-secondary">프로필 수정</a>
+    <a href="/generate/{{ user }}" class="btn btn-primary">자소서 생성 →</a>
+  </div>
 </div>
 
 <div class="tabs">
@@ -61,7 +67,8 @@
   </div>
   {% else %}
   <div class="card">
-    <p class="empty">작성된 자소서가 없습니다. Claude에서 자소서 작성을 먼저 실행해주세요.</p>
+    <p class="empty">작성된 자소서가 없습니다.</p>
+    <a href="/generate/{{ user }}" class="btn btn-primary btn-sm">+ 새 자소서 작성</a>
   </div>
   {% endif %}
 </div>
@@ -99,9 +106,31 @@
       <div class="card" style="background:#f5f5f7; border:none; padding:12px 16px;">
         <div id="uploadMsg" style="font-size:13px;"></div>
       </div>
-      <p style="margin-top:12px; font-size:13px; color:#1d1d1f;">
-        업로드가 완료됐습니다. Claude에서 <strong><code>{{ user }} 파싱해줘</code></strong>를 실행해 경험 DB를 생성하세요.
-      </p>
+    </div>
+  </div>
+
+  <!-- 파싱 (S1-2) -->
+  <div class="card">
+    <h2>경험 DB 생성</h2>
+    <p style="color:#6e6e73; font-size:13px; margin-bottom:16px;">
+      raw/ 의 파일을 읽어 경험 DB(experiences/), 어투 분석(writing-style.md) 등을 자동으로 만듭니다.
+      {% if experiences %}이미 경험 {{ experiences|length }}개가 있습니다. 다시 실행하면 전체를 재생성합니다.{% endif %}
+    </p>
+    <button class="btn btn-primary" id="parseBtn" onclick="startParse()">파싱 시작</button>
+
+    <div id="parseProgress" style="display:none; margin-top:16px;">
+      <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+        <span class="spinner" id="parseSpinner" style="display:inline-block; width:12px; height:12px; border-radius:50%;
+              border:2px solid #d2d2d7; border-top-color:#0066cc; animation:spin .7s linear infinite;"></span>
+        <span style="font-size:13px; font-weight:500;" id="parseTitle">진행 중...</span>
+      </div>
+      <div id="parseLog" style="font-size:12px; color:#6e6e73; line-height:1.9; max-height:200px; overflow-y:auto;"></div>
+    </div>
+
+    <div id="parseResult" style="display:none; margin-top:16px;">
+      <div class="card" style="background:#f5f5f7; border:none;">
+        <pre id="parseReport" style="font-size:12px; white-space:pre-wrap; font-family:inherit;"></pre>
+      </div>
     </div>
   </div>
 
@@ -176,6 +205,99 @@ async function uploadFiles(files) {
   if (res.skipped.length) msg.innerHTML += `<p style="color:#856404">⚠️ 지원하지 않는 형식 (스킵): ${res.skipped.join(', ')}</p>`;
   document.getElementById('uploadResult').style.display = '';
   toast(`${res.saved.length}개 파일 업로드 완료`);
+}
+
+// 파싱 (S1-2). generate.html 과 같은 SSE-over-fetch 형식을 쓴다 (parse.py / generate.py 가 공유하는 형식).
+async function consumeSSE(response, onEvent) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf('\n\n')) !== -1) {
+      const chunk = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      if (!chunk.trim()) continue;
+      const lines = chunk.split('\n');
+      const ev = (lines[0] || '').replace('event: ', '');
+      const dataLine = lines.slice(1).join('\n');
+      let data = {};
+      try { data = JSON.parse(dataLine.replace(/^data: /, '')); } catch (e) {}
+      onEvent(ev, data);
+    }
+  }
+}
+
+const PARSE_STAGE_LABEL = {
+  extract: '파일 읽는 중',
+  llm_start: '분석 시작',
+  generating: '분석 중...',
+  llm_done: '분석 완료',
+  write: '파일 저장',
+  reject: '거부됨',
+};
+
+function parseLogLine(text) {
+  const log = document.getElementById('parseLog');
+  const div = document.createElement('div');
+  div.textContent = text;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+async function startParse(force) {
+  document.getElementById('parseBtn').disabled = true;
+  document.getElementById('parseProgress').style.display = '';
+  document.getElementById('parseResult').style.display = 'none';
+  document.getElementById('parseLog').innerHTML = '';
+  document.getElementById('parseTitle').textContent = '진행 중...';
+
+  const url = '/parse/{{ user }}' + (force ? '?force=1' : '');
+  try {
+    const res = await fetch(url, { method: 'POST' });
+    let doneData = null, errorMsg = null, existingCount = null;
+    await consumeSSE(res, (ev, data) => {
+      if (ev === 'progress') {
+        const label = PARSE_STAGE_LABEL[data.stage] || data.stage;
+        if (data.stage === 'extract') parseLogLine(`${label}: ${data.file}${data.ok ? '' : ' — ' + data.note}`);
+        else if (data.stage === 'write') parseLogLine(`💾 ${data.file}`);
+        else if (data.stage !== 'generating') parseLogLine(label);
+      } else if (ev === 'done') {
+        doneData = data;
+      } else if (ev === 'error') {
+        errorMsg = data.message;
+        existingCount = data.existing_count;
+      }
+    });
+
+    document.getElementById('parseBtn').disabled = false;
+    document.getElementById('parseProgress').style.display = 'none';
+
+    if (errorMsg) {
+      if (existingCount) {
+        if (confirm(errorMsg + '\n\n전체를 재파싱할까요? 기존 경험 파일이 새로 생성된 내용으로 교체됩니다.')) {
+          return startParse(true);
+        }
+      } else {
+        toast(errorMsg, 4000);
+      }
+      return;
+    }
+    if (!doneData) {
+      toast('파싱 결과를 받지 못했습니다.', 4000);
+      return;
+    }
+    document.getElementById('parseResult').style.display = '';
+    document.getElementById('parseReport').textContent = doneData.report || `${doneData.written.length}개 파일 생성 완료`;
+    toast('파싱 완료. 새로고침하면 경험 DB에 반영됩니다.', 4000);
+  } catch (e) {
+    document.getElementById('parseBtn').disabled = false;
+    document.getElementById('parseProgress').style.display = 'none';
+    toast('요청 중 오류가 발생했습니다: ' + e.message, 4000);
+  }
 }
 </script>
 {% endblock %}

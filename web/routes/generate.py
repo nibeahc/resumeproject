@@ -19,13 +19,22 @@ import re
 import threading
 from pathlib import Path
 
-from flask import Blueprint, Response, request, stream_with_context
+from flask import Blueprint, Response, redirect, render_template, request, stream_with_context, url_for
 
 from lib.llm import stream_complete
 from lib.skills import load_skill
 from web.paths import output_dir, project_root, safe_path, user_dir, valid_segment
 
 bp = Blueprint('generate', __name__)
+
+
+@bp.route('/generate/<name>', methods=['GET'])
+def generate_page(name):
+    if not user_dir(name).exists():
+        return redirect(url_for('main.index'))
+    exp_dir = user_dir(name) / 'experiences'
+    exp_count = len(list(exp_dir.glob('*.md'))) if exp_dir.exists() else 0
+    return render_template('generate.html', user=name, exp_count=exp_count)
 
 _ANSWER_BLOCK = re.compile(r'===ANSWER===\n(?P<body>.*?)\n===END===', re.S)
 _META_BLOCK = re.compile(r'===META===\n(?P<body>.*?)\n===END===', re.S)

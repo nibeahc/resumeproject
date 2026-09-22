@@ -1,0 +1,267 @@
+{% extends "base.html" %}
+{% block title %}자소서 생성 — {{ user }}{% endblock %}
+
+{% block content %}
+<style>
+  .form-label { display:block; font-size:12px; color:#6e6e73; margin-bottom:4px; font-weight:500; }
+  .form-input {
+    width:100%; padding:9px 12px; border:1px solid #d2d2d7; border-radius:8px;
+    font-size:14px; font-family:inherit; background:#fff; color:#1d1d1f;
+    transition:border-color .15s;
+  }
+  .form-input:focus { outline:none; border-color:#0066cc; }
+  textarea.form-input { resize:vertical; line-height:1.6; }
+  .form-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  @media (max-width:600px) { .form-grid { grid-template-columns:1fr; } }
+
+  .char-row { display:flex; align-items:center; gap:10px; }
+  .char-row .form-input { width:110px; flex:none; }
+  .radio-group { display:flex; gap:14px; font-size:13px; color:#1d1d1f; }
+  .radio-group label { display:flex; align-items:center; gap:5px; cursor:pointer; }
+
+  #progressBox { display:none; }
+  #progressBox .card { background:#f5f5f7; border:none; }
+  #progressLog { font-size:12px; color:#6e6e73; line-height:1.9; }
+  #progressLog .cur { color:#0066cc; font-weight:500; }
+  .spinner { display:inline-block; width:12px; height:12px; border-radius:50%;
+             border:2px solid #d2d2d7; border-top-color:#0066cc; animation:spin .7s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+
+  #resultBox { display:none; }
+  .answer-text { white-space:pre-wrap; line-height:1.8; font-size:14px; }
+  .meta-text { white-space:pre-wrap; font-size:12px; color:#6e6e73; line-height:1.8; margin-top:14px;
+               padding-top:14px; border-top:1px solid #f0f0f5; }
+  .char-badge { font-size:12px; font-weight:600; padding:3px 10px; border-radius:99px; }
+  .char-ok { background:#d1e7dd; color:#0a3622; }
+  .char-over { background:#f8d7da; color:#842029; }
+</style>
+
+<div style="margin-bottom:20px; font-size:13px; color:#6e6e73;">
+  <a href="/">홈</a>
+  <span style="margin:0 6px;">›</span>
+  <a href="/user/{{ user }}">{{ user }}</a>
+  <span style="margin:0 6px;">›</span>
+  자소서 생성
+</div>
+
+<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+  <h1 style="margin:0">자소서 생성</h1>
+  <a href="/user/{{ user }}" class="btn btn-secondary">취소</a>
+</div>
+
+{% if exp_count == 0 %}
+<div class="card" style="background:#fff3cd; border-color:#ffe69c;">
+  <p style="font-size:13px; color:#856404;">
+    ⚠️ 아직 경험 DB가 없습니다. <a href="/user/{{ user }}">{{ user }} 페이지</a>에서 원본 파일을 업로드하고 먼저 파싱을 진행해주세요.
+  </p>
+</div>
+{% else %}
+<p style="color:#6e6e73; font-size:13px; margin-bottom:24px;">
+  경험 {{ exp_count }}개를 바탕으로 작성합니다. 기업명, 직무명, 문항, 글자수를 입력하세요.
+</p>
+{% endif %}
+
+<form id="genForm" onsubmit="return false;">
+  <div class="card">
+    <h2 style="margin-bottom:16px;">문항 정보</h2>
+    <div class="form-grid" style="margin-bottom:12px;">
+      <div>
+        <label class="form-label">기업명</label>
+        <input class="form-input" type="text" id="company" placeholder="예: CJ대한통운" required>
+      </div>
+      <div>
+        <label class="form-label">직무명</label>
+        <input class="form-input" type="text" id="position" placeholder="예: 글로벌SCM" required>
+      </div>
+    </div>
+    <div style="margin-bottom:12px;">
+      <label class="form-label">문항</label>
+      <textarea class="form-input" id="question" rows="2" placeholder="예: 지원 동기를 서술하시오" required></textarea>
+    </div>
+    <div>
+      <label class="form-label">글자수</label>
+      <div class="char-row">
+        <input class="form-input" type="number" id="charLimit" min="1" placeholder="800" required>
+        <span style="font-size:13px; color:#6e6e73;">자</span>
+        <div class="radio-group" style="margin-left:12px;">
+          <label><input type="radio" name="countMode" value="포함" checked> 공백 포함</label>
+          <label><input type="radio" name="countMode" value="제외"> 공백 제외</label>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div style="display:flex; justify-content:flex-end; margin-top:4px; margin-bottom:20px;">
+    <button type="button" class="btn btn-primary" id="genBtn" onclick="generate()" {% if exp_count == 0 %}disabled{% endif %}>
+      생성 →
+    </button>
+  </div>
+</form>
+
+<div id="progressBox">
+  <div class="card">
+    <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">
+      <span class="spinner" id="spinner"></span>
+      <span style="font-size:13px; font-weight:500;" id="progressTitle">준비 중...</span>
+    </div>
+    <div id="progressLog"></div>
+  </div>
+</div>
+
+<div id="resultBox">
+  <div class="card" id="warnCard" style="display:none; background:#f8d7da; border-color:#f1aeb5;">
+    <p style="font-size:13px; color:#842029;" id="warnText"></p>
+  </div>
+  <div class="card">
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:14px;">
+      <h2 style="margin:0" id="resultQuestion"></h2>
+      <span class="char-badge" id="charBadge"></span>
+    </div>
+    <div class="answer-text" id="answerText"></div>
+    <div class="meta-text" id="metaText"></div>
+  </div>
+  <div style="display:flex; justify-content:space-between; align-items:center;">
+    <a href="#" id="savedLink" class="btn btn-secondary">저장된 파일 열기 / 편집 →</a>
+    <button class="btn btn-secondary" onclick="resetForm()">다른 문항 작성</button>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// 서버가 "event: X\ndata: Y\n\n" 형식(SSE)으로 스트리밍한다. fetch 로 받아서 직접 파싱한다
+// (EventSource 는 GET 만 지원해서 못 쓴다). parse.py 와 generate.py 가 같은 형식을 쓴다.
+async function consumeSSE(response, onEvent) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf('\n\n')) !== -1) {
+      const chunk = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      if (!chunk.trim()) continue;
+      const lines = chunk.split('\n');
+      const ev = (lines[0] || '').replace('event: ', '');
+      const dataLine = lines.slice(1).join('\n');
+      let data = {};
+      try { data = JSON.parse(dataLine.replace(/^data: /, '')); } catch (e) {}
+      onEvent(ev, data);
+    }
+  }
+}
+
+const STAGE_LABEL = {
+  context_ready: '자료 확인 완료',
+  generating: '작성 중...',
+  draft: '초안 완료',
+  retry: '글자수 보정 중...',
+};
+
+function logLine(text) {
+  const log = document.getElementById('progressLog');
+  document.querySelectorAll('#progressLog .cur').forEach(el => el.classList.remove('cur'));
+  const div = document.createElement('div');
+  div.className = 'cur';
+  div.textContent = text;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+async function generate() {
+  const company = document.getElementById('company').value.trim();
+  const position = document.getElementById('position').value.trim();
+  const question = document.getElementById('question').value.trim();
+  const charLimit = document.getElementById('charLimit').value;
+  const countMode = document.querySelector('input[name="countMode"]:checked').value;
+
+  if (!company || !position || !question || !charLimit) {
+    toast('모든 항목을 입력해주세요.');
+    return;
+  }
+
+  document.getElementById('genBtn').disabled = true;
+  document.getElementById('progressBox').style.display = '';
+  document.getElementById('resultBox').style.display = 'none';
+  document.getElementById('progressLog').innerHTML = '';
+  document.getElementById('spinner').style.display = '';
+  document.getElementById('progressTitle').textContent = '생성 중...';
+
+  try {
+    const res = await fetch('/generate/{{ user }}', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        company, position, question,
+        char_limit: charLimit, count_mode: countMode,
+      }),
+    });
+
+    let doneData = null, errorMsg = null;
+    await consumeSSE(res, (ev, data) => {
+      if (ev === 'progress') {
+        const label = STAGE_LABEL[data.stage] || data.stage;
+        if (data.stage === 'retry') logLine(`⚠️ ${label} (${data.diff > 0 ? data.diff + '자 초과' : Math.abs(data.diff) + '자 부족'})`);
+        else if (data.stage === 'draft') logLine(`${label} — ${data.chars}자`);
+        else logLine(label);
+      } else if (ev === 'done') {
+        doneData = data;
+      } else if (ev === 'error') {
+        errorMsg = data.message;
+      }
+    });
+
+    document.getElementById('genBtn').disabled = false;
+    document.getElementById('progressBox').style.display = 'none';
+
+    if (errorMsg) {
+      toast(errorMsg, 4000);
+      return;
+    }
+    if (!doneData) {
+      toast('생성 결과를 받지 못했습니다.', 4000);
+      return;
+    }
+    showResult(question, doneData);
+  } catch (e) {
+    document.getElementById('genBtn').disabled = false;
+    document.getElementById('progressBox').style.display = 'none';
+    toast('요청 중 오류가 발생했습니다: ' + e.message, 4000);
+  }
+}
+
+function showResult(question, data) {
+  document.getElementById('resultQuestion').textContent = question;
+  document.getElementById('answerText').textContent = data.answer;
+  document.getElementById('metaText').textContent = data.meta;
+
+  const badge = document.getElementById('charBadge');
+  badge.textContent = `${data.chars}자 / 목표 ${data.limit}자`;
+  badge.className = 'char-badge ' + (data.exceeded ? 'char-over' : 'char-ok');
+
+  const warnCard = document.getElementById('warnCard');
+  if (data.exceeded) {
+    warnCard.style.display = '';
+    document.getElementById('warnText').textContent =
+      `⚠️ 글자수 제한을 초과했습니다 (재시도 ${data.retries}회 후에도 ${data.chars - data.limit}자 초과). 내용을 직접 다듬어주세요.`;
+  } else {
+    warnCard.style.display = 'none';
+  }
+
+  const filename = data.saved_to.split('/').pop();
+  document.getElementById('savedLink').href = `/output/{{ user }}/${encodeURIComponent(filename)}`;
+
+  document.getElementById('resultBox').style.display = '';
+  toast('자소서 생성 완료');
+}
+
+function resetForm() {
+  document.getElementById('question').value = '';
+  document.getElementById('resultBox').style.display = 'none';
+  document.getElementById('question').focus();
+}
+</script>
+{% endblock %}
