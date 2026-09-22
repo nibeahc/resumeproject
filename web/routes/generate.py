@@ -8,10 +8,9 @@ S1-1 에서 모델이 자체 보고한 글자수(683자)가 실제 글자수(715
 파싱하기엔 약하다. 그래서 S1-2 와 같은 방식으로, 우리가 정한 구분자 안에 본문만 담아 달라고 요청한다
 (스킬 파일 자체는 건드리지 않는다 — 1-B 원칙. 구분자는 이 라우트의 사용자 메시지에서만 요구한다).
 
-경험 선택(Step 7)은 아직 코드로 분리되어 있지 않다 (그 분리는 S3-1 에서 한다). 지금은 사용자의
-모든 경험 파일 전문을 프롬프트에 실어 LLM 이 그 안에서 고르게 한다 — 있지도 않은 경험을 지어내지
-않게 하려면 실제 내용을 줘야 하기 때문이다. 경험이 많은 사용자는 호출 비용이 커진다는 게 이 방식의
-약점이고, S3-1 에서 선택을 코드로 옮기면 해결된다.
+경험 선택(Step 7)은 lib/selector.py 가 코드로 한다 (ROADMAP S3-1). LLM 호출에는 선택된 1~2개
+경험의 전문만 실린다 — 전체를 다 보내던 이전 방식보다 비용이 훨씬 적게 든다. 코드가 고른 결과가
+마음에 안 들면 요청에 experience_files 를 넣어 강제로 지정할 수 있다 (S3-2 가 이 위에 UI 를 얹는다).
 """
 import json
 import queue
@@ -22,6 +21,7 @@ from pathlib import Path
 from flask import Blueprint, Response, redirect, render_template, request, stream_with_context, url_for
 
 from lib.llm import stream_complete
+from lib.selector import select as select_experiences
 from lib.skills import load_skill
 from web.paths import output_dir, project_root, safe_path, user_dir, valid_segment
 
@@ -52,8 +52,8 @@ def read_if_exists(path: Path):
 
 def build_prompt(name, company, position, question, char_limit, count_mode,
                   profile_text, style_text, rules_text, interest_text,
-                  company_text, reference_texts, experiences):
-    exp_dump = '\n\n'.join(f'--- users/{name}/experiences/{fn} ---\n{text}' for fn, text in experiences)
+                  company_text, reference_texts, selected_experiences):
+    exp_dump = '\n\n'.join(f'--- users/{name}/experiences/{fn} ---\n{text}' for fn, text in selected_experiences)
     ref_dump = ('\n\n'.join(f'--- {fn} ---\n{text}' for fn, text in reference_texts)
                 if reference_texts else '(로컬 레퍼런스 없음. MCP 는 이 환경에 연결되어 있지 않으므로 Step 4 는 생략)')
     company_note = (
@@ -72,7 +72,8 @@ def build_prompt(name, company, position, question, char_limit, count_mode,
 문항: {question}
 글자수: {char_limit}자 ({count_desc})
 
-Step 1(파일 읽기)은 아래에 이미 첨부되어 있습니다. Step 5부터 Step 8까지 수행하세요.
+Step 1(파일 읽기)은 아래에 이미 첨부되어 있습니다. Step 5~7(문항 분석, 유형 분류, 경험 선택)은
+코드가 이미 끝냈습니다 — 아래 [이미 선택된 경험]만 보고 Step 8(문단 작성)을 하세요.
 Step 2, Step 4 는 아래 안내를 따르세요. Step 9(출력 형식), Step 10(파일 저장)은 이 호출에서 스킵합니다
 (코드가 별도로 처리합니다). 대신 아래 구분자 형식으로만 답하세요.
 
@@ -96,11 +97,11 @@ Step 2, Step 4 는 아래 안내를 따르세요. Step 9(출력 형식), Step 10
 레퍼런스가 있어도 문장·표현·사례를 그대로 쓰지 마세요. 구조·전개 방식만 참고하고,
 표현과 사례는 반드시 아래 experiences/ 원문에서만 가져오세요.
 
-[Step 7 후보 경험 전체 — 이 중에서만 골라야 합니다. 없는 경험을 지어내지 마세요]
+[이미 선택된 경험 — 이 안에서만 쓰세요. 다른 경험을 지어내거나 끌어오지 마세요]
 {exp_dump}
 
 [지시]
-- Step 7 경험 선택 원칙(활동 최대 2개, 기본 1개)을 지키세요.
+- 위에 주어진 경험만 사용하세요. 여러 경험이 있으면 자연스럽게 연결해서 서술하세요.
 - 선택한 경험 파일에 "⚠️ 오래된 경험" 표시가 있으면, 이 호출은 되물을 수 없으므로 일단 그대로 사용하되
   META 블록에 그 사실을 명시하세요.
 - 글자수는 최대한 {char_limit}자에 가깝게 채우되 절대 넘기지 마세요 (여유를 약간 두는 편이 넘기는 것보다 낫습니다).
@@ -200,16 +201,22 @@ def generate(name):
         char_limit = None
         errors.append('글자수(char_limit)가 없거나 올바르지 않습니다. 반드시 숫자로 지정해야 합니다.')
 
+    # experience_files: S3-2 UI 가 사용자의 직접 선택을 강제할 때 쓴다. JSON 배열이나
+    # 콤마 구분 문자열 둘 다 받는다. 존재하지 않는 파일명은 selector.select() 가 조용히 무시한다.
+    override_files = data.get('experience_files')
+    if isinstance(override_files, str):
+        override_files = [f.strip() for f in override_files.split(',') if f.strip()]
+
     if errors:
         def bad():
             yield sse('error', {'message': ' '.join(errors)})
         return Response(bad(), mimetype='text/event-stream')
 
     exp_dir = root / 'experiences'
-    experiences = [(f.name, f.read_text(encoding='utf-8')) for f in sorted(exp_dir.glob('*.md'))] if exp_dir.exists() else []
+    has_experiences = exp_dir.exists() and any(exp_dir.glob('*.md'))
 
     def stream():
-        if not experiences:
+        if not has_experiences:
             yield sse('error', {'message': '경험 파일이 없습니다. 먼저 파싱을 진행하세요.'})
             return
 
@@ -225,13 +232,27 @@ def generate(name):
             for f in sorted(ref_dir.glob('*.md'))[:3]:
                 reference_texts.append((f.name, f.read_text(encoding='utf-8')))
 
-        yield sse('progress', {'stage': 'context_ready', 'experiences': len(experiences),
+        # Step 5~7: 경험 선택은 LLM 이 아니라 코드가 한다 (S3-1). 선택된 것만 프롬프트에 실린다.
+        selection = select_experiences(exp_dir, question, interest_text=interest_text,
+                                        max_count=2, override_filenames=override_files)
+        selected_experiences = [(c.experience.filename, c.experience.path.read_text(encoding='utf-8'))
+                                 for c in selection['selected']]
+        yield sse('progress', {
+            'stage': 'selected',
+            'question_type': selection['question_type'],
+            'selected': [{'filename': c.experience.filename, 'title': c.experience.title,
+                          'score': c.score, 'reasons': c.reasons} for c in selection['selected']],
+            'candidates': [{'filename': c.experience.filename, 'title': c.experience.title,
+                            'score': c.score, 'reasons': c.reasons} for c in selection['candidates'][:6]],
+        })
+
+        yield sse('progress', {'stage': 'context_ready', 'experiences': len(selected_experiences),
                                 'company_cached': bool(company_text.strip()), 'references': len(reference_texts)})
 
         system = load_skill('write-coverletter')
         user_msg = build_prompt(name, company, position, question, char_limit, count_mode,
                                  profile_text, style_text, rules_text, interest_text,
-                                 company_text, reference_texts, experiences)
+                                 company_text, reference_texts, selected_experiences)
         messages = [{'role': 'user', 'content': user_msg}]
 
         def call_llm(msgs):
@@ -324,6 +345,7 @@ def generate(name):
             'exceeded': exceeded,
             'retries': retries,
             'saved_to': str(out_path.relative_to(project_root().resolve())),
+            'used_experiences': [fn for fn, _ in selected_experiences],  # 코드가 실제로 고른 파일 (LLM 자체보고가 아니다)
         })
 
     return Response(stream_with_context(stream()), mimetype='text/event-stream')

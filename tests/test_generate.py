@@ -85,7 +85,10 @@ class GenerateRouteTest(unittest.TestCase):
         self.root = self.tmp / 'root'
         u = self.root / 'users' / '홍길동'
         (u / 'experiences').mkdir(parents=True)
-        (u / 'experiences' / '2024-테스트경험.md').write_text('# 테스트 경험\n내용', encoding='utf-8')
+        (u / 'experiences' / '2024-테스트경험.md').write_text(
+            '# 테스트 경험\n\n## 메타\n\n- 카테고리: 리더십\n- 키워드: 리더십, 팀워크\n\n내용입니다', encoding='utf-8')
+        (u / 'experiences' / '2023-다른경험.md').write_text(
+            '# 다른 경험\n\n## 메타\n\n- 카테고리: 전문성·직무역량\n- 키워드: 데이터분석\n\n다른 내용입니다', encoding='utf-8')
         (u / 'profile.md').write_text('프로필', encoding='utf-8')
         (self.root / 'outputs' / '홍길동').mkdir(parents=True)
         app = create_app({'PROJECT_ROOT': self.root, 'TESTING': True})
@@ -189,6 +192,52 @@ class GenerateRouteTest(unittest.TestCase):
         text = out.read_text(encoding='utf-8')
         self.assertIn('기존 내용', text)
         self.assertIn('새 답변', text)
+
+    def test_experience_files_override_changes_prompt_content(self):
+        """S3-1 완료 조건: 같은 문항에 경험 A, B 를 각각 지정하면 프롬프트에 실리는 내용이 달라진다."""
+        fake = llm_result('===ANSWER===\n답변\n===END===\n===META===\n참조한 경험: x\n===END===\n')
+
+        with patch.object(generate_route, 'stream_complete', return_value=fake) as m:
+            r = self.post(experience_files=['2024-테스트경험.md'])
+            r.get_data()
+        prompt_a = m.call_args.kwargs['messages'][0]['content']
+        self.assertIn('2024-테스트경험.md', prompt_a)
+        self.assertIn('내용입니다', prompt_a)
+        self.assertNotIn('다른 내용입니다', prompt_a)
+
+        with patch.object(generate_route, 'stream_complete', return_value=fake) as m:
+            r = self.post(experience_files=['2023-다른경험.md'])
+            r.get_data()
+        prompt_b = m.call_args.kwargs['messages'][0]['content']
+        self.assertIn('2023-다른경험.md', prompt_b)
+        self.assertIn('다른 내용입니다', prompt_b)
+        self.assertNotIn('테스트 경험\n\n## 메타', prompt_b)  # 첫 번째 경험 파일 전문은 없어야 함
+
+        self.assertNotEqual(prompt_a, prompt_b)
+
+    def test_experience_files_override_as_comma_string(self):
+        """폼 인코딩으로 오면 콤마 구분 문자열일 수 있다."""
+        fake = llm_result('===ANSWER===\n답변\n===END===\n===META===\n참조한 경험: x\n===END===\n')
+        with patch.object(generate_route, 'stream_complete', return_value=fake) as m:
+            self.post(experience_files='2023-다른경험.md').get_data()
+        prompt = m.call_args.kwargs['messages'][0]['content']
+        self.assertIn('다른 내용입니다', prompt)
+
+    def test_selected_event_reports_question_type_and_reasons(self):
+        fake = llm_result('===ANSWER===\n답변\n===END===\n===META===\n참조한 경험: x\n===END===\n')
+        with patch.object(generate_route, 'stream_complete', return_value=fake):
+            r = self.post(question='리더십을 발휘한 경험을 서술하시오')
+            body = r.get_data(as_text=True)
+        self.assertIn('"stage": "selected"', body)
+        self.assertIn('"question_type": "경험형"', body)
+        self.assertIn('2024-테스트경험.md', body)  # 리더십 키워드가 겹치는 경험이 선택되어야 함
+
+    def test_done_event_reports_used_experiences_from_code_not_llm(self):
+        fake = llm_result('===ANSWER===\n답변\n===END===\n===META===\n참조한 경험: 아무거나\n===END===\n')
+        with patch.object(generate_route, 'stream_complete', return_value=fake):
+            r = self.post(experience_files=['2023-다른경험.md'])
+            body = r.get_data(as_text=True)
+        self.assertIn('"used_experiences": ["2023-다른경험.md"]', body)
 
     def test_unsafe_company_or_position_rejected_before_llm_call(self):
         with patch.object(generate_route, 'stream_complete') as m:
