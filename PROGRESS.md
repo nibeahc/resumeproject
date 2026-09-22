@@ -15,9 +15,10 @@
 ## 마지막 세션
 
 - **날짜**: 2026-09-21
-- **한 일**: S0 전체 완료, S1 전체 완료 (LLM 레이어, 파싱/생성 라우트, 생성 UI).
-  **S1 마일스톤 달성: 브라우저만으로 업로드 → 파싱 → 자소서 생성이 실제 서버로 확인됨**
-- **다음 할 일**: **S2 (텍스트 추출 코드화)** — S1-2 가 .hwp/.pdf 를 못 읽는 문제를 이제 제대로 고칠 차례
+- **한 일**: S0 전체 완료, S1 전체 완료 (S1 마일스톤 달성: 브라우저만으로 업로드 → 파싱 → 자소서 생성),
+  S2 전체 완료 (lib/extract.py, 실패 폴백 UI)
+- **다음 할 일**: **S3-1, S3-2 (경험 선택 분리)** — Step 7(선택)과 Step 8(작성)을 분리해서
+  S1-3 의 "경험 전문을 매번 통째로 프롬프트에 싣는" 문제도 함께 해결
 - **막힌 것**: 없음
 - **S1-2 설계 메모 — 원본 스킬의 대화형 확인 3곳을 자동화함** (되돌리고 싶으면 web/routes/parse.py 상단 docstring 참고):
   1. 재파싱 여부 → experiences/ 가 있으면 거부, force=1 필요 (신규 파일만 추가하는 기능은 없음. 전체 재파싱만)
@@ -85,6 +86,35 @@
 - **S1-4 검증**: 실제 Flask 서버를 띄우고 curl 로 전체 여정을 처음부터 끝까지 재현함 —
   새 사용자 생성 → 파일 업로드 → 파싱(SSE, 경험 1개 생성) → 생성 페이지 로드(200) → 자소서 생성
   (SSE, 재시도 1회 후 374/400자) → 저장된 파일 에디터로 열람(200) → 대시보드(200). 전부 성공
+
+- **S2-1 구현**: lib/extract.py, ExtractResult(ok, text, error, method) 데이터클래스.
+  .md/.txt 직접 읽기, .docx/.hwpx 는 zip+XML, .hwp 는 hwp5txt 서브프로세스(PATH 우선,
+  이 프로젝트 환경의 고정 경로를 폴백으로), .pdf 는 pypdf. 성공 100자 미만이면 실패로 처리한다.
+  web/routes/parse.py 의 자체 구현(S1-2 때 "임시"라고 표시해둔 것)을 이 모듈을 부르는 얇은
+  래퍼로 교체해서 중복을 없앴다 (tests/test_parse.py 의 관련 테스트도 얇은 위임 확인 2개로 축소,
+  나머지 추출 케이스는 tests/test_extract.py 14개가 전담)
+- **S2-1 실측 (완료 조건)**: `python3 -m lib.extract users/채빈/raw` → 32개 중 pypdf 설치 전 15개 성공,
+  설치 후 26개 성공. 남은 6개 실패는 코드 결함이 아니라 정당한 실패였다 — 확인해보니 hwp5txt 가
+  표·이미지 위주 hwp 문서(장학금 신청서 등 정형 양식)에서 `<표>`, `<그림>` 같은 placeholder 만 뽑고
+  종료 코드는 0 을 준다. 100자 미만 컷오프가 이걸 "성공한 척하는 빈 결과"로 잡아낸다.
+  같은 문서의 .pdf 버전은 대부분 성공했다 (raw/ 에 두 포맷이 같이 있으면 자동으로 보완됨)
+- **S2-1 새 의존성**: web/requirements.txt 에 pypdf 추가, pip3 install pypdf 로 설치 완료.
+  hwp5txt 는 이미 설치되어 있었음 (pyhwp 패키지, PATH 에는 없음).
+  → 같은 세션에서 바로 처리: lib/config.py 에 hwp5txt_path() 추가, .env.example 에 HWP5TXT_PATH
+  안내, lib/extract.py 의 find_hwp5txt() 우선순위를 .env 설정 > PATH > 하드코딩 폴백으로 변경.
+  하드코딩 경로는 최후 폴백으로 남겨둬서 기존 환경은 설정 없이도 그대로 동작한다
+- **S2-2 구현**: web/routes/documents.py 에 POST /raw-fallback/<name> 추가. 원본 raw 파일은 자르지도
+  덮어쓰지도 않는다 (Claude.md 절대 금지) — 대신 "<원본이름>.붙여넣기.md" 라는 새 파일을 같은 폴더에
+  만든다. parse.py 는 이 파일도 다른 raw 파일과 똑같이 읽는다. user.html 파싱 진행 로그에서 추출
+  실패 이벤트가 오면 그 자리에 "내용 붙여넣기" 버튼과 textarea 가 바로 뜬다.
+  parse.py 의 extract SSE 이벤트에 kind(apply/logs) 필드를 추가해야 프론트가 어느 폴더에
+  저장할지 알 수 있었다 (원래 없었음, 이번에 추가)
+- **S2-2 검증**: tests/test_parse.py 에 통합 테스트 추가 — 추출 실패 → /raw-fallback 저장 →
+  재파싱 시 원본은 여전히 실패로 나오고 붙여넣은 사본만 성공으로 잡히는 것을 스텁 LLM 으로 확인.
+  원본 파일 바이트가 한 글자도 안 바뀌었는지도 확인함
+- **S2 전체**: 새 테스트 21개 (test_extract.py 14 + test_parse.py 통합 1 + test_web_security.py
+  RawFallbackTest 6), 전체 69개 통과, 전부 API 비용 없음 (real API 검증은 S2-1 완료 조건의
+  lib.extract 채빈 raw/ 실측 하나로 충분하다고 판단해 추가 실호출은 생략함)
 - **주의**: claude-sonnet-5 는 요청하지 않아도 thinking 을 켤 때가 있다. thinking 이 max_tokens 를 전부
   써버리면 답변 텍스트가 0자로 나온다 (실측: input 8772 / max_tokens 4000 전부 thinking 소진, stop_reason=max_tokens).
   lib/llm.py 의 stream_complete() 는 기본으로 thinking 을 끈다 (thinking={"type":"disabled"}).
@@ -115,8 +145,11 @@
 
 ### S2. 텍스트 추출 코드화
 
-- [ ] S2-1 추출기 (lib/extract.py, 성공/실패 명시 반환)
-- [ ] S2-2 실패 폴백 UI (붙여넣기 입력)
+- [x] S2-1 추출기 (lib/extract.py, 성공/실패 명시 반환) — 2026-09-22
+  (채빈 raw/ 32개 파일 실측: pypdf 설치 후 26 성공 / 6 실패. 실패는 표·이미지 위주 문서의
+  hwp5txt 한계로 정당한 실패임을 확인)
+- [x] S2-2 실패 폴백 UI (붙여넣기 입력) — 2026-09-22
+  (POST /raw-fallback/<user>, user.html 파싱 로그에 실패 파일마다 붙여넣기 입력창 표시)
 
 ### S3. 경험 선택 분리와 대화형 발굴
 

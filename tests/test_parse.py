@@ -1,9 +1,12 @@
-"""S1-2 파싱 라우트 테스트. extract_text/parse_result 는 실제로, LLM 호출은 스텁으로 검증한다."""
+"""S1-2 파싱 라우트 테스트. LLM 호출은 스텁으로, 나머지는 실제로 검증한다.
+
+텍스트 추출 자체(성공/실패 각 케이스)는 lib/extract.py 소관이라 tests/test_extract.py 가 다룬다.
+여기서는 parse.py 의 extract_text() 가 그 모듈을 제대로 호출해서 결과를 (ok, text, note) 튜플로
+바꿔주는지만 얇게 확인한다."""
 import shutil
 import sys
 import tempfile
 import unittest
-import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,14 +16,14 @@ from web import create_app  # noqa: E402
 from web.routes import parse as parse_route  # noqa: E402
 
 
-class ExtractTextTest(unittest.TestCase):
+class ExtractTextWrapperTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_md_and_txt_read_directly(self):
+    def test_delegates_to_lib_extract_on_success(self):
         p = self.tmp / 'a.md'
         p.write_text('가' * 150, encoding='utf-8')
         ok, text, note = parse_route.extract_text(p)
@@ -28,36 +31,13 @@ class ExtractTextTest(unittest.TestCase):
         self.assertEqual(len(text), 150)
         self.assertEqual(note, '')
 
-    def test_short_text_rejected(self):
+    def test_delegates_to_lib_extract_on_failure(self):
         p = self.tmp / 'a.txt'
         p.write_text('짧음', encoding='utf-8')
         ok, text, note = parse_route.extract_text(p)
         self.assertFalse(ok)
+        self.assertEqual(text, '')
         self.assertIn('100자 미만', note)
-
-    def test_docx_zip_xml_extracted(self):
-        p = self.tmp / 'a.docx'
-        content = ('<w:t>안녕하세요 ' * 30) + '</w:t>'  # 태그가 안 맞아도 findall 패턴만 맞으면 됨
-        xml = f'<root>{"<w:t>내용입니다 문장 하나 더 씁니다</w:t>" * 10}</root>'
-        with zipfile.ZipFile(p, 'w') as z:
-            z.writestr('word/document.xml', xml)
-        ok, text, note = parse_route.extract_text(p)
-        self.assertTrue(ok, note)
-        self.assertIn('내용입니다', text)
-
-    def test_bad_zip_reported_not_crashed(self):
-        p = self.tmp / 'broken.hwpx'
-        p.write_bytes(b'not a zip file')
-        ok, text, note = parse_route.extract_text(p)
-        self.assertFalse(ok)
-        self.assertIn('읽을 수 없음', note)
-
-    def test_unsupported_extension(self):
-        p = self.tmp / 'a.hwp'
-        p.write_bytes(b'x' * 200)
-        ok, text, note = parse_route.extract_text(p)
-        self.assertFalse(ok)
-        self.assertIn('S2', note)
 
 
 class ParseResultPathSafetyTest(unittest.TestCase):
@@ -161,6 +141,36 @@ class ParseRouteTest(unittest.TestCase):
         # llm_start 와 llm_done 사이에 generating 이 와야 진짜 "중간 진행" 이다
         self.assertLess(body.index('llm_start'), body.index('"stage": "generating"'))
         self.assertLess(body.index('"stage": "generating"'), body.index('llm_done'))
+
+    def test_fallback_file_is_picked_up_on_next_parse(self):
+        """S2-2 통합: 추출 실패 → /raw-fallback 으로 붙여넣기 저장 → 재파싱 시 원본 대신 새 파일이 읽힌다."""
+        apply_dir = self.root / 'users' / '홍길동' / 'raw' / 'apply'
+        (apply_dir / 'ok.md').write_text('정상적으로 읽히는 파일입니다. ' * 10, encoding='utf-8')
+        (apply_dir / '깨진파일.hwp').write_bytes(b'\x00\x01broken')  # hwp5txt 가 못 읽는 가짜 파일
+
+        fake = {'text': '===REPORT===\n완료\n===END===\n', 'stop_reason': 'end_turn',
+                'usage': {'input_tokens': 1, 'output_tokens': 1, 'thinking_tokens': 0}}
+        with patch.object(parse_route, 'stream_complete', return_value=fake):
+            r1 = self.c.post('/parse/홍길동')
+            body1 = r1.get_data(as_text=True)
+        self.assertIn('"file": "\uae68\uc9c4\ud30c\uc77c.hwp", "kind": "apply", "ok": false', body1)
+
+        # 사용자가 실패한 파일 내용을 직접 붙여넣는다
+        r2 = self.c.post('/raw-fallback/홍길동', json={
+            'kind': 'apply', 'filename': '깨진파일.hwp',
+            'content': '사용자가 직접 붙여넣은 진짜 내용입니다. ' * 5,
+        })
+        self.assertTrue(r2.get_json()['success'])
+        self.assertTrue((apply_dir / '깨진파일.붙여넣기.md').exists())
+
+        # 재파싱하면 원본은 여전히 실패하지만, 붙여넣은 사본은 성공해야 한다
+        with patch.object(parse_route, 'stream_complete', return_value=fake):
+            r3 = self.c.post('/parse/홍길동?force=1')
+            body3 = r3.get_data(as_text=True)
+        self.assertIn('"file": "\uae68\uc9c4\ud30c\uc77c.hwp", "kind": "apply", "ok": false', body3)
+        self.assertIn('"file": "\uae68\uc9c4\ud30c\uc77c.\ubd99\uc5ec\ub123\uae30.md", "kind": "apply", "ok": true', body3)
+        # 원본은 여전히 그대로다 (raw/ 절대 수정 금지)
+        self.assertEqual((apply_dir / '깨진파일.hwp').read_bytes(), b'\x00\x01broken')
 
     def test_force_bypasses_existing_check(self):
         (self.root / 'users' / '홍길동' / 'experiences' / 'a.md').write_text('x', encoding='utf-8')

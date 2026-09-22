@@ -18,47 +18,23 @@ import json
 import queue
 import re
 import threading
-import zipfile
 from pathlib import Path
 
 from flask import Blueprint, Response, request, stream_with_context
 
+from lib.extract import extract as extract_file
 from lib.llm import stream_complete
 from lib.skills import load_skill
 from web.paths import project_root, user_dir
 
 bp = Blueprint('parse', __name__)
 
-# ── 텍스트 추출 (임시. S2 에서 lib/extract.py 의 ExtractResult 로 교체 예정) ─────────────
-# parse-experiences.md Step 0-B 에 적힌 방법을 그대로 코드로 옮겼다.
-
-_ZIP_XML = {
-    '.docx': ('word/document.xml', re.compile(r'<w:t[^>]*>([^<]*)</w:t>')),
-    '.hwpx': ('Contents/section0.xml', re.compile(r'<hp:t[^>]*>([^<]*)</hp:t>')),
-}
-_MIN_CHARS = 100
-
 
 def extract_text(path: Path):
-    """(ok, text, note) 를 돌려준다. ok=False 면 text 는 빈 문자열이고 note 에 이유가 있다."""
-    suffix = path.suffix.lower()
-    if suffix in ('.md', '.txt'):
-        text = path.read_text(encoding='utf-8', errors='replace')
-        if len(text) < _MIN_CHARS:
-            return False, '', f'추출된 텍스트가 {_MIN_CHARS}자 미만 (내용 없음)'
-        return True, text, ''
-    if suffix in _ZIP_XML:
-        member, pattern = _ZIP_XML[suffix]
-        try:
-            with zipfile.ZipFile(path, 'r') as z:
-                xml = z.read(member).decode('utf-8', errors='replace')
-        except (zipfile.BadZipFile, KeyError, FileNotFoundError) as e:
-            return False, '', f'{suffix} 구조를 읽을 수 없음 ({e})'
-        text = '\n'.join(t for t in pattern.findall(xml) if t.strip())
-        if len(text) < _MIN_CHARS:
-            return False, '', f'추출된 텍스트가 {_MIN_CHARS}자 미만 (내용 없음 또는 암호화)'
-        return True, text, ''
-    return False, '', f'{suffix} 추출은 아직 지원하지 않음 (S2 예정)'
+    """(ok, text, note) 를 돌려준다. lib/extract.py 의 얇은 래퍼다 (S2-1 이전 자체 구현은 제거됨).
+    이 함수가 반환 형태를 유지하는 건 이 라우트 안의 나머지 코드와 기존 테스트가 튜플을 기대해서다."""
+    r = extract_file(path)
+    return r.ok, r.text, r.error or ''
 
 
 # ── LLM 프롬프트 구성과 결과 파싱 ────────────────────────────────────────────────────
@@ -225,7 +201,7 @@ def parse_user(name):
         for kind, files in (('apply', apply_files), ('logs', logs_files)):
             for f in files:
                 ok, text, note = extract_text(f)
-                yield sse('progress', {'stage': 'extract', 'file': f.name, 'ok': ok, 'note': note})
+                yield sse('progress', {'stage': 'extract', 'file': f.name, 'kind': kind, 'ok': ok, 'note': note})
                 (extracted if ok else skipped).append((kind, f.name, text) if ok else (f.name, note))
 
         if not extracted:

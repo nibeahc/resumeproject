@@ -117,6 +117,12 @@ def db_path():
     return p if p.is_absolute() else PROJECT_ROOT / p
 
 
+def hwp5txt_path():
+    """hwp5txt 실행 파일 경로. 지정하지 않으면 None (lib/extract.py 가 PATH 와 자체 폴백을 시도한다)."""
+    raw = get('HWP5TXT_PATH')
+    return Path(raw).expanduser() if raw else None
+
+
 def mask(value):
     """화면 출력용. 키 앞 6자와 뒤 2자만 남긴다."""
     return value if len(value) <= 12 else f'{value[:6]}...{value[-2:]}'
@@ -136,8 +142,10 @@ def check():
             ok = False
         else:
             print(f'  --    {name:<18} [{tag}] 없음 - {desc}')
-    print(f'  MODEL   {model()}' + ('' if get('MODEL') else ' (기본값)'))
-    print(f'  DB_PATH {db_path()}' + ('' if get('DB_PATH') else ' (기본값)'))
+    print(f'  MODEL       {model()}' + ('' if get('MODEL') else ' (기본값)'))
+    print(f'  DB_PATH     {db_path()}' + ('' if get('DB_PATH') else ' (기본값)'))
+    hwp = hwp5txt_path()
+    print(f'  HWP5TXT_PATH {hwp}' if hwp else '  HWP5TXT_PATH (미설정 — lib/extract.py 가 PATH 와 자체 폴백을 시도)')
     return ok
 
 

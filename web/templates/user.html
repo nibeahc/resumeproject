@@ -248,6 +248,59 @@ function parseLogLine(text) {
   log.scrollTop = log.scrollHeight;
 }
 
+// 추출 실패 파일에 "읽을 수 없습니다. 내용을 붙여넣어 주세요" 입력창을 붙인다 (S2-2).
+// 여기서 붙여넣어도 이번 파싱에는 반영되지 않는다 — 저장만 해 두고, 다시 파싱을 눌러야 포함된다.
+function renderExtractFailure(kind, filename, note) {
+  const log = document.getElementById('parseLog');
+  const box = document.createElement('div');
+  box.style.cssText = 'margin:6px 0; padding:8px 10px; background:#fff3cd; border:1px solid #ffe69c; border-radius:8px;';
+  box.innerHTML = `
+    <div style="font-size:12px;">⚠️ 읽을 수 없습니다: ${escapeHtml(filename)} — ${escapeHtml(note)}</div>
+    <button type="button" class="btn btn-secondary btn-sm" style="margin-top:6px;"
+            onclick="const f=this.nextElementSibling; f.style.display = f.style.display === 'none' ? '' : 'none';">
+      내용 붙여넣기
+    </button>
+    <div style="display:none; margin-top:8px;">
+      <textarea rows="4" placeholder="파일을 열어서 내용을 복사한 뒤 여기에 붙여넣으세요 (최소 20자)"
+                style="width:100%; padding:8px; border:1px solid #d2d2d7; border-radius:8px; font-size:13px; font-family:inherit; resize:vertical;"></textarea>
+      <button type="button" class="btn btn-primary btn-sm" style="margin-top:6px;"
+              onclick="saveFallback(this, ${JSON.stringify(kind)}, ${JSON.stringify(filename)})">저장</button>
+    </div>
+  `;
+  log.appendChild(box);
+  log.scrollTop = log.scrollHeight;
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+async function saveFallback(btn, kind, filename) {
+  const textarea = btn.previousElementSibling;
+  const content = textarea.value.trim();
+  if (content.length < 20) { toast('내용이 너무 짧습니다 (최소 20자).'); return; }
+  btn.disabled = true;
+  try {
+    const res = await fetch('/raw-fallback/{{ user }}', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind, filename, content }),
+    }).then(r => r.json());
+    if (res.success) {
+      toast(`저장 완료 (${res.saved_as}). 다시 파싱하면 반영됩니다.`, 4000);
+      textarea.disabled = true;
+      btn.textContent = '저장됨';
+    } else {
+      toast(res.error || '저장 실패', 4000);
+      btn.disabled = false;
+    }
+  } catch (e) {
+    toast('저장 중 오류: ' + e.message, 4000);
+    btn.disabled = false;
+  }
+}
+
 async function startParse(force) {
   document.getElementById('parseBtn').disabled = true;
   document.getElementById('parseProgress').style.display = '';
@@ -262,7 +315,10 @@ async function startParse(force) {
     await consumeSSE(res, (ev, data) => {
       if (ev === 'progress') {
         const label = PARSE_STAGE_LABEL[data.stage] || data.stage;
-        if (data.stage === 'extract') parseLogLine(`${label}: ${data.file}${data.ok ? '' : ' — ' + data.note}`);
+        if (data.stage === 'extract') {
+          parseLogLine(`${label}: ${data.file}${data.ok ? '' : ' — ' + data.note}`);
+          if (!data.ok) renderExtractFailure(data.kind, data.file, data.note);
+        }
         else if (data.stage === 'write') parseLogLine(`💾 ${data.file}`);
         else if (data.stage !== 'generating') parseLogLine(label);
       } else if (ev === 'done') {

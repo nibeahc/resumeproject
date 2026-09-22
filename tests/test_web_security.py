@@ -28,6 +28,7 @@ EXPECTED_ROUTES = {
     ('/parse/<name>', 'POST'),
     ('/generate/<name>', 'POST'),
     ('/generate/<name>', 'GET'),
+    ('/raw-fallback/<name>', 'POST'),
     ('/static/<path:filename>', 'GET'),
 }
 
@@ -146,6 +147,56 @@ class UploadTest(WebTestBase):
     def test_invalid_kind_and_user_rejected(self):
         self.assertEqual(self.upload('a.md', kind='../../x').status_code, 400)
         self.assertEqual(self.upload('a.md', user='..').status_code, 400)
+
+
+class RawFallbackTest(WebTestBase):
+    """S2-2: 추출 실패 파일의 내용을 직접 붙여넣는 폴백. 원본 raw 파일은 절대 건드리지 않는다."""
+
+    def setUp(self):
+        super().setUp()
+        self.original = self.root / 'users' / '홍길동' / 'raw' / 'apply' / '스캔본.hwp'
+        self.original.write_bytes(b'\x00binary garbage that fails to extract')
+
+    def post(self, **kw):
+        payload = {'kind': 'apply', 'filename': '스캔본.hwp', 'content': '붙여넣은 실제 내용입니다. ' * 3}
+        payload.update(kw)
+        return self.c.post('/raw-fallback/홍길동', json=payload)
+
+    def test_saves_as_sibling_file_without_touching_original(self):
+        r = self.post()
+        data = r.get_json()
+        self.assertTrue(data['success'])
+        self.assertEqual(data['saved_as'], '스캔본.붙여넣기.md')
+
+        sibling = self.original.parent / '스캔본.붙여넣기.md'
+        self.assertTrue(sibling.exists())
+        self.assertIn('붙여넣은 실제 내용입니다', sibling.read_text(encoding='utf-8'))
+        # 원본은 바이트 하나도 바뀌지 않아야 한다
+        self.assertEqual(self.original.read_bytes(), b'\x00binary garbage that fails to extract')
+
+    def test_too_short_content_rejected(self):
+        r = self.post(content='짧음')
+        data = r.get_json()
+        self.assertFalse(data['success'])
+        self.assertFalse((self.original.parent / '스캔본.붙여넣기.md').exists())
+
+    def test_missing_original_file_rejected(self):
+        r = self.post(filename='없는파일.hwp')
+        self.assertFalse(r.get_json()['success'])
+
+    def test_invalid_kind_rejected(self):
+        self.assertEqual(self.post(kind='../../x').status_code, 400)
+
+    def test_path_traversal_in_filename_rejected(self):
+        self.assertEqual(self.post(filename='../../../etc/passwd').status_code, 400)
+        self.assertFalse((self.tmp / 'etc' / 'passwd.붙여넣기.md').exists())
+
+    def test_resubmission_overwrites_previous_paste(self):
+        self.post(content='첫 번째 붙여넣기 내용입니다. ' * 3)
+        self.post(content='두 번째로 고친 붙여넣기 내용입니다. ' * 3)
+        sibling = self.original.parent / '스캔본.붙여넣기.md'
+        self.assertIn('두 번째로 고친', sibling.read_text(encoding='utf-8'))
+        self.assertNotIn('첫 번째', sibling.read_text(encoding='utf-8'))
 
 
 if __name__ == '__main__':
