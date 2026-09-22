@@ -15,12 +15,16 @@
 ## 마지막 세션
 
 - **날짜**: 2026-09-21
-- **한 일**: 저장소 정리(1.01GB 임시 pack 제거, .git 1.1GB → 164KB),
-  자동 점검 스크립트와 git hook 설치, 계획 문서 4종 작성,
-  S0-2 Flask 보안 3종 적용 (사용자명 경로 검증 포함), S0-3 SQLite 계층, S0-4 설정 로더,
-  S0-5 앱 팩토리와 Blueprint 분리 (S0 전체 완료)
-- **다음 할 일**: **S1-1 (LLM 레이어)**. 착수 전에 .env 에 ANTHROPIC_API_KEY 를 직접 넣어야 한다 (`python3 -m lib.config` 로 확인)
+- **한 일**: S0 전체 완료(저장소 정리, 보안, SQLite, 설정 로더, Blueprint 분리),
+  S1-1 LLM 레이어 (lib/llm.py, lib/skills.py) 구현 및 실제 생성 테스트
+- **다음 할 일**: **S1-2 (파싱 라우트)**
 - **막힌 것**: 없음
+- **주의**: claude-sonnet-5 는 요청하지 않아도 thinking 을 켤 때가 있다. thinking 이 max_tokens 를 전부
+  써버리면 답변 텍스트가 0자로 나온다 (실측: input 8772 / max_tokens 4000 전부 thinking 소진, stop_reason=max_tokens).
+  lib/llm.py 의 stream_complete() 는 기본으로 thinking 을 끈다 (thinking={"type":"disabled"}).
+  이 동작은 tests/test_llm.py 로 고정되어 있으니, llm.py 를 고칠 때 건드리지 말 것
+- **LLM 이 보고하는 글자수는 못 믿는다**: 실측 결과 모델이 "683자" 라고 자체 보고했으나 실제로는 715자였다 (32자, 4.5% 오차).
+  ROADMAP S1-3 이 "글자수 검증을 코드로 하라"고 못박은 이유가 실측으로 확인됨. S1-3 구현 시 python len() 으로 직접 검증할 것
 - **결정 사항**: 개인용(로컬 실행, BYOK)으로 먼저 만든다. 호스팅은 추후 과제로 남긴다
 
 ---
@@ -37,7 +41,7 @@
 
 ### S1. 생성 엔진 웹 이관 — 서비스화의 단일 병목
 
-- [ ] S1-1 LLM 레이어 (lib/llm.py, lib/skills.py)
+- [x] S1-1 LLM 레이어 (lib/llm.py, lib/skills.py) — 2026-09-22 (채빈/CJ대한통운/글로벌SCM 지원동기 800자 실제 생성 확인)
 - [ ] S1-2 파싱 라우트 (POST /parse/<user>)
 - [ ] S1-3 생성 라우트 (POST /generate/<user>, 글자수 코드 검증)
 - [ ] S1-4 생성 UI (generate.html)
