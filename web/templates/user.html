@@ -44,7 +44,9 @@
   </div>
   {% else %}
   <div class="card">
-    <p class="empty">경험 파일이 없습니다. Claude에서 <code>{{ user }} 파싱해줘</code>를 실행해주세요.</p>
+    <p class="empty">경험 파일이 없습니다. 원본 파일이 있다면 "파일 업로드" 탭에서 올린 뒤 파싱하고,
+      없다면 대화로 만들 수 있습니다.</p>
+    <a href="/elicit/{{ user }}" class="btn btn-primary btn-sm">대화로 경험 만들기 →</a>
   </div>
   {% endif %}
 </div>

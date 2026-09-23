@@ -29,6 +29,8 @@ EXPECTED_ROUTES = {
     ('/generate/<name>', 'POST'),
     ('/generate/<name>', 'GET'),
     ('/raw-fallback/<name>', 'POST'),
+    ('/elicit/<name>', 'GET'),
+    ('/elicit/<name>', 'POST'),
     ('/static/<path:filename>', 'GET'),
 }
 
