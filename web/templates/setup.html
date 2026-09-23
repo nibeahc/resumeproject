@@ -94,6 +94,37 @@
               placeholder="희망 직무 1&#10;희망 직무 2">{{ profile.get('목표직무', '') }}</textarea>
   </div>
 
+  <div class="card">
+    <h2 style="margin-bottom:4px;">작성 규칙</h2>
+    <p style="font-size:12px; color:#6e6e73; margin-bottom:10px;">
+      자소서 생성 시 writing-style.md 와 동일한 가중치로 적용됩니다. 파싱을 이미 했다면
+      writing-style.md 분석에서 뽑은 초안이 아래 채워져 있을 수 있습니다 — 확인 후 고치세요.
+      한 줄에 하나씩 입력하세요.
+    </p>
+    <div class="form-grid">
+      <div>
+        <label class="form-label">구조 (전개·마무리 방식)</label>
+        <textarea class="form-input" name="구조" rows="3"
+                  placeholder="예: 두괄식 — 첫 문장에 핵심 강점을 먼저 제시">{{ writing_rules.get('구조', '') }}</textarea>
+      </div>
+      <div>
+        <label class="form-label">금지 표현</label>
+        <textarea class="form-input" name="금지표현" rows="3"
+                  placeholder="예: &quot;열정&quot;, &quot;도전&quot; 등 클리셰 단어 금지">{{ writing_rules.get('금지표현', '') }}</textarea>
+      </div>
+      <div>
+        <label class="form-label">선호 표현</label>
+        <textarea class="form-input" name="선호표현" rows="3"
+                  placeholder="예: 수치·수상·기관명을 구체적으로 명시">{{ writing_rules.get('선호표현', '') }}</textarea>
+      </div>
+      <div>
+        <label class="form-label">기타</label>
+        <textarea class="form-input" name="기타" rows="3"
+                  placeholder="예: 문항당 최대 3문장, 핵심만">{{ writing_rules.get('기타', '') }}</textarea>
+      </div>
+    </div>
+  </div>
+
   <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:4px;">
     <a href="/user/{{ user }}" class="btn btn-secondary">취소</a>
     <button type="submit" class="btn btn-primary">저장 →</button>

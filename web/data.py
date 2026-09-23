@@ -68,3 +68,24 @@ def parse_profile(name):
         '어학자격': section(r'어학 / 자격'),
         '목표직무': section(r'목표 직무'),
     }
+
+
+def parse_writing_rules(name):
+    """writing-rules.md 를 setup.html 폼 필드용으로 읽는다.
+    templates/user-skeleton/writing-rules.md 의 섹션 구성(구조/금지 표현/선호 표현/기타)과
+    parse-experiences.md 가 자동 생성하는 초안이 이 구조를 따른다 (S3-5)."""
+    p = user_dir(name) / 'writing-rules.md'
+    if not p.exists():
+        return {}
+    text = p.read_text(encoding='utf-8')
+
+    def section(header):
+        m = re.search(rf'## {header}\n(.*?)(?=\n## |\Z)', text, re.S)
+        return m.group(1).strip() if m else ''
+
+    return {
+        '구조':      section('구조'),
+        '금지표현':  section('금지 표현'),
+        '선호표현':  section('선호 표현'),
+        '기타':      section('기타'),
+    }

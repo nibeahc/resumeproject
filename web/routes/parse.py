@@ -74,7 +74,8 @@ def build_prompt(name, extracted, skipped, profile_text, interest_text, writing_
     rules_note = (
         '이미 존재하므로 만들지 않습니다.'
         if writing_rules_exists
-        else 'Step 2 의 템플릿(## 구조 / ## 기타 뼈대)으로 새로 만드세요.'
+        else 'Step 2 지시대로, writing-style.md 의 "피해야 할 표현" 등 분석 결과를 옮겨 초안을 '
+             '만드세요. 빈 뼈대(## 구조 / ## 기타만 있는 형태)로 만들지 마세요.'
     )
 
     experience_template = EXPERIENCE_TEMPLATE_PATH.read_text(encoding='utf-8')

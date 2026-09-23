@@ -78,6 +78,23 @@ class RouteStructureTest(WebTestBase):
         self.assertIn('/user/', r.headers['Location'])
         self.assertIn('GPA: 4.0/4.5', (self.root / 'users' / '홍길동' / 'profile.md').read_text(encoding='utf-8'))
 
+    def test_profile_save_writes_writing_rules(self):
+        """S3-5: 작성 규칙 탭에 입력한 내용이 writing-rules.md 에 실제로 반영된다."""
+        r = self.c.post('/profile/홍길동/setup', data={
+            '이름': '홍길동', '금지표현': '"열정", "도전" 금지', '선호표현': '수치를 구체적으로 명시',
+        })
+        self.assertEqual(r.status_code, 302)
+        rules = (self.root / 'users' / '홍길동' / 'writing-rules.md').read_text(encoding='utf-8')
+        self.assertIn('"열정", "도전" 금지', rules)
+        self.assertIn('수치를 구체적으로 명시', rules)
+
+    def test_setup_page_prefills_existing_writing_rules(self):
+        (self.root / 'users' / '홍길동' / 'writing-rules.md').write_text(
+            '# 홍길동 작성 규칙\n\n## 구조\n\n두괄식\n\n## 금지 표현\n\n클리셰 금지\n\n'
+            '## 선호 표현\n\n수치 명시\n\n## 기타\n\n', encoding='utf-8')
+        r = self.c.get('/profile/홍길동/setup')
+        self.assertIn('클리셰 금지'.encode('utf-8'), r.data)
+
     def test_save_roundtrip(self):
         r = self.c.post('/experience/홍길동/a.md/save', json={'content': '수정됨'})
         self.assertEqual(r.get_json(), {'success': True})
