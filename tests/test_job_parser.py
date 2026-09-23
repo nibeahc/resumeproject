@@ -161,6 +161,78 @@ class JobParserTest(unittest.TestCase):
         fake_fetch.assert_not_called()
 
 
+class PreviewCommitSplitTest(unittest.TestCase):
+    """S4-3: 웹 UI가 '파싱 결과 확인 후 저장' 하려면 preview() 가 아무것도 쓰지 않고,
+    commit() 이 그 결과를 받아 실제로 저장할 수 있어야 한다."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.db_path = self.tmp / 'app.db'
+        self.jobs_dir = self.tmp / 'jobs'
+        db.init_db(self.db_path)
+        self.raw = ('백엔드 개발자 채용\n\n[자격요건]\n- Python 3년 이상\n\n[우대사항]\n- AWS 경험\n\n'
+                    '마감일: 2026-12-31')
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_preview_writes_nothing(self):
+        with patch.object(job_parser, 'stream_complete', return_value=llm_result(make_output())):
+            p = job_parser.preview(self.raw, db_path=self.db_path)
+        self.assertTrue(p.ok)
+        self.assertFalse(p.saved)
+        conn = db.get_conn(self.db_path)
+        count = conn.execute('SELECT COUNT(*) AS n FROM jobs').fetchone()['n']
+        conn.close()
+        self.assertEqual(count, 0)
+        self.assertFalse(self.jobs_dir.exists())
+
+    def test_commit_after_preview_saves_once(self):
+        with patch.object(job_parser, 'stream_complete', return_value=llm_result(make_output())):
+            p = job_parser.preview(self.raw, db_path=self.db_path)
+        r = job_parser.commit(p, jobs_dir=self.jobs_dir, db_path=self.db_path)
+        self.assertTrue(r.ok)
+        self.assertTrue(r.saved)
+        self.assertEqual(r.source_job_id, '0001')
+        self.assertTrue((self.jobs_dir / 'manual-0001.md').exists())
+
+    def test_commit_reflects_user_edited_company_position(self):
+        """확인 화면에서 회사명/직무명을 사용자가 고쳤다면 그 값으로 저장되어야 한다."""
+        with patch.object(job_parser, 'stream_complete', return_value=llm_result(make_output())):
+            p = job_parser.preview(self.raw, db_path=self.db_path)
+        p.company = '수정된회사명'
+        p.position = '수정된직무명'
+        r = job_parser.commit(p, jobs_dir=self.jobs_dir, db_path=self.db_path)
+        self.assertEqual(r.company, '수정된회사명')
+        self.assertEqual(r.position, '수정된직무명')
+
+    def test_commit_twice_second_call_is_duplicate_not_double_write(self):
+        with patch.object(job_parser, 'stream_complete', return_value=llm_result(make_output())):
+            p = job_parser.preview(self.raw, db_path=self.db_path)
+        r1 = job_parser.commit(p, jobs_dir=self.jobs_dir, db_path=self.db_path)
+        r2 = job_parser.commit(p, jobs_dir=self.jobs_dir, db_path=self.db_path)
+        self.assertFalse(r1.duplicate)
+        self.assertTrue(r2.duplicate)
+        self.assertEqual(r2.job_id, r1.job_id)
+        conn = db.get_conn(self.db_path)
+        count = conn.execute('SELECT COUNT(*) AS n FROM jobs').fetchone()['n']
+        conn.close()
+        self.assertEqual(count, 1)
+
+    def test_commit_on_failed_preview_is_noop(self):
+        p = job_parser.JobResult(ok=False, error='LLM 호출 실패: 테스트')
+        r = job_parser.commit(p, jobs_dir=self.jobs_dir, db_path=self.db_path)
+        self.assertFalse(r.ok)
+        self.assertEqual(r.error, 'LLM 호출 실패: 테스트')
+
+    def test_commit_rejects_blanked_out_company(self):
+        with patch.object(job_parser, 'stream_complete', return_value=llm_result(make_output())):
+            p = job_parser.preview(self.raw, db_path=self.db_path)
+        p.company = '   '
+        r = job_parser.commit(p, jobs_dir=self.jobs_dir, db_path=self.db_path)
+        self.assertFalse(r.ok)
+
+
 class NormalizeMarkdownMetaTest(unittest.TestCase):
     """S4-2 실측에서 발견: LLM 이 공고 ID(템플릿 예시값을 베낌)와 수집일(오늘 날짜를 알 방법이
     없어 매번 다르게 지어냄)을 실제 값과 다르게 채웠다. 코드가 강제로 덮어써야 한다."""

@@ -41,14 +41,21 @@ MIN_RAW_LENGTH = 50  # 이보다 짧으면 공고 본문이 아니라 링크나 
 class JobResult:
     ok: bool
     duplicate: bool = False
+    saved: bool = False                  # jobs 테이블 + 파일까지 실제로 썼는가 (preview() 는 False)
     job_id: Optional[int] = None
     source: str = 'manual'
     source_job_id: str = ''
     path: str = ''                       # jobs/ 기준 상대 경로
     company: str = ''
     position: str = ''
+    deadline: Optional[str] = None
+    employment_type: Optional[str] = None
     required: List[str] = field(default_factory=list)
     preferred: List[str] = field(default_factory=list)
+    markdown: str = ''                   # preview() 가 commit() 에 그대로 넘겨주는 값
+    raw_text: str = ''
+    content_hash: str = ''
+    url: str = ''
     error: str = ''
 
 
@@ -149,13 +156,25 @@ def parse_llm_output(text: str):
     }, None
 
 
-def parse_and_save(raw_text: str, url: str = '', company_hint: str = '', position_hint: str = '',
-                    jobs_dir: Path = None, db_path=None, model=None) -> JobResult:
-    """공고 본문을 파싱해 jobs_dir/manual-NNNN.md + jobs 테이블 행으로 저장한다.
+def _duplicate_result(existing: dict) -> JobResult:
+    return JobResult(
+        ok=True, duplicate=True, saved=True, job_id=existing['id'], source=existing['source'],
+        source_job_id=existing['source_job_id'] or '', path=existing['raw_path'] or '',
+        company=existing['company'], position=existing['position'], deadline=existing['deadline'],
+        employment_type=existing['employment_type'],
+        required=json.loads(existing['required_json']), preferred=json.loads(existing['preferred_json']),
+        content_hash=existing['content_hash'] or '',
+    )
+
+
+def preview(raw_text: str, url: str = '', company_hint: str = '', position_hint: str = '',
+            db_path=None, model=None) -> JobResult:
+    """LLM 을 호출해 구조화만 한다 — DB/파일에는 아무것도 쓰지 않는다 (S4-3 이 이 결과를
+    화면에 보여주고, 사용자가 확인/보정한 뒤 commit() 을 호출해 실제로 저장한다).
 
     이미 같은 내용(공백 정규화 후 해시 일치)의 공고가 있으면 LLM 을 호출하지 않고
-    duplicate=True 로 기존 행 정보를 돌려준다 — 같은 공고를 실수로 두 번 붙여넣어도
-    비용이 들지 않는다.
+    duplicate=True + saved=True 로 기존 행을 그대로 돌려준다 — 같은 공고를 실수로
+    두 번 붙여넣어도 비용이 들지 않는다.
     """
     raw_text = raw_text or ''
     if len(raw_text.strip()) < MIN_RAW_LENGTH:
@@ -164,12 +183,7 @@ def parse_and_save(raw_text: str, url: str = '', company_hint: str = '', positio
     h = content_hash(raw_text)
     existing = find_by_hash(h, db_path)
     if existing:
-        return JobResult(
-            ok=True, duplicate=True, job_id=existing['id'], source=existing['source'],
-            source_job_id=existing['source_job_id'] or '', path=existing['raw_path'] or '',
-            company=existing['company'], position=existing['position'],
-            required=json.loads(existing['required_json']), preferred=json.loads(existing['preferred_json']),
-        )
+        return _duplicate_result(existing)
 
     system = load_skill('parse-job')
     user_msg = build_prompt(raw_text, url=url, company_hint=company_hint, position_hint=position_hint)
@@ -193,6 +207,34 @@ def parse_and_save(raw_text: str, url: str = '', company_hint: str = '', positio
     if deadline is not None and not _DEADLINE_RE.match(str(deadline)):
         deadline = None  # 형식이 이상하면 지어내지 말고 비워둔다
 
+    return JobResult(
+        ok=True, duplicate=False, saved=False, company=company, position=position,
+        deadline=deadline, employment_type=meta.get('employment_type'),
+        required=parsed['required'], preferred=parsed['preferred'], markdown=parsed['markdown'],
+        raw_text=raw_text, content_hash=h, url=url.strip(),
+    )
+
+
+def commit(preview_result: JobResult, jobs_dir: Path = None, db_path=None) -> JobResult:
+    """preview() 가 돌려준 결과를 실제로 jobs_dir/manual-NNNN.md + jobs 테이블에 쓴다.
+
+    preview 와 commit 사이에 같은 공고가 이미 저장됐을 수 있으므로(같은 화면을 두 번
+    제출하는 등) 여기서 content_hash 로 한 번 더 확인한다 — 이때는 duplicate=True 로
+    기존 행을 돌려주고 새로 쓰지 않는다.
+    """
+    if not preview_result.ok or preview_result.duplicate:
+        return preview_result  # 이미 실패했거나 이미 저장된 것 — 새로 할 일이 없다
+
+    company = preview_result.company.strip()
+    position = preview_result.position.strip()
+    if not company or not position:
+        return JobResult(ok=False, error='회사명 또는 직무명이 비어 있습니다.')
+
+    h = preview_result.content_hash or content_hash(preview_result.raw_text)
+    existing = find_by_hash(h, db_path)
+    if existing:
+        return _duplicate_result(existing)
+
     conn = db.get_conn(db_path)
     try:
         source_job_id = _next_manual_id(conn)
@@ -200,9 +242,10 @@ def parse_and_save(raw_text: str, url: str = '', company_hint: str = '', positio
         conn.execute(
             'INSERT INTO jobs (source, source_job_id, company, position, deadline, employment_type, '
             'required_json, preferred_json, url, raw_path, content_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-            ('manual', source_job_id, company, position, deadline, meta.get('employment_type'),
-             json.dumps(parsed['required'], ensure_ascii=False), json.dumps(parsed['preferred'], ensure_ascii=False),
-             url.strip() or None, f'jobs/{filename}', h),
+            ('manual', source_job_id, company, position, preview_result.deadline, preview_result.employment_type,
+             json.dumps(preview_result.required, ensure_ascii=False),
+             json.dumps(preview_result.preferred, ensure_ascii=False),
+             preview_result.url or None, f'jobs/{filename}', h),
         )
         job_id = conn.execute('SELECT last_insert_rowid() AS id').fetchone()['id']
         conn.commit()
@@ -211,11 +254,23 @@ def parse_and_save(raw_text: str, url: str = '', company_hint: str = '', positio
 
     if jobs_dir is not None:
         jobs_dir.mkdir(parents=True, exist_ok=True)
-        markdown = _normalize_markdown_meta(parsed['markdown'], 'manual', source_job_id)
+        markdown = _normalize_markdown_meta(preview_result.markdown, 'manual', source_job_id)
         (jobs_dir / filename).write_text(markdown + '\n', encoding='utf-8')
 
     return JobResult(
-        ok=True, duplicate=False, job_id=job_id, source='manual', source_job_id=source_job_id,
-        path=f'jobs/{filename}', company=company, position=position,
-        required=parsed['required'], preferred=parsed['preferred'],
+        ok=True, duplicate=False, saved=True, job_id=job_id, source='manual', source_job_id=source_job_id,
+        path=f'jobs/{filename}', company=company, position=position, deadline=preview_result.deadline,
+        employment_type=preview_result.employment_type,
+        required=preview_result.required, preferred=preview_result.preferred, content_hash=h,
     )
+
+
+def parse_and_save(raw_text: str, url: str = '', company_hint: str = '', position_hint: str = '',
+                    jobs_dir: Path = None, db_path=None, model=None) -> JobResult:
+    """preview() + commit() 을 한 번에 — CLI/스킬 직접 실행처럼 확인 단계 없이 바로 저장할 때 쓴다.
+    S4-3 웹 UI는 이 함수 대신 preview() 로 먼저 보여주고 commit() 으로 저장한다."""
+    p = preview(raw_text, url=url, company_hint=company_hint, position_hint=position_hint,
+                db_path=db_path, model=model)
+    if not p.ok or p.duplicate:
+        return p
+    return commit(p, jobs_dir=jobs_dir, db_path=db_path)

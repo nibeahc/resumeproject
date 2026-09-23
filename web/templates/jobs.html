@@ -1,0 +1,213 @@
+{% extends "base.html" %}
+{% block title %}공고 관리{% endblock %}
+
+{% block content %}
+<style>
+  .form-label { display:block; font-size:12px; color:#6e6e73; margin-bottom:4px; font-weight:500; }
+  .form-input {
+    width:100%; padding:9px 12px; border:1px solid #d2d2d7; border-radius:8px;
+    font-size:14px; font-family:inherit; background:#fff; color:#1d1d1f;
+  }
+  .form-input:focus { outline:none; border-color:#0066cc; }
+  textarea.form-input { resize:vertical; line-height:1.6; }
+  .form-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px; }
+  @media (max-width:600px) { .form-grid { grid-template-columns:1fr; } }
+  .hint { font-size:12px; color:#6e6e73; margin-bottom:10px; line-height:1.6; }
+  #jobMarkdown { white-space:pre-wrap; font-size:12px; line-height:1.6; background:#f5f5f7;
+                 border-radius:8px; padding:12px; max-height:320px; overflow-y:auto; }
+</style>
+
+<h1>공고 관리</h1>
+
+<div class="card">
+  <h2 style="margin-bottom:6px;">새 공고 등록</h2>
+  <p class="hint">
+    채용 사이트를 직접 열어 가져오지 않습니다 — 원문 URL은 참고용으로만 저장하고,
+    실제 파싱은 아래 붙여넣은 본문만 사용합니다.
+  </p>
+
+  <label class="form-label">원문 URL (선택)</label>
+  <input class="form-input" id="urlInput" type="text" placeholder="https://..." style="margin-bottom:12px;">
+
+  <label class="form-label">공고 본문 (붙여넣기, 필수)</label>
+  <textarea class="form-input" id="rawInput" rows="10"
+            placeholder="채용공고 페이지의 본문 전체를 여기에 붙여넣으세요." style="margin-bottom:12px;"></textarea>
+
+  <div class="form-grid">
+    <div>
+      <label class="form-label">회사명 힌트 (원문에 없을 때만)</label>
+      <input class="form-input" id="companyHint" type="text">
+    </div>
+    <div>
+      <label class="form-label">직무명 힌트 (원문에 없을 때만)</label>
+      <input class="form-input" id="positionHint" type="text">
+    </div>
+  </div>
+
+  <div style="display:flex; justify-content:flex-end;">
+    <button class="btn btn-primary" id="previewBtn" onclick="doPreview()">파싱하기</button>
+  </div>
+</div>
+
+<div class="card" id="previewCard" hidden>
+  <h2 style="margin-bottom:12px;">파싱 결과 확인</h2>
+  <div class="form-grid">
+    <div>
+      <label class="form-label">회사명</label>
+      <input class="form-input" id="pCompany" type="text">
+    </div>
+    <div>
+      <label class="form-label">직무명</label>
+      <input class="form-input" id="pPosition" type="text">
+    </div>
+    <div>
+      <label class="form-label">마감일 (YYYY-MM-DD, 상시면 비워둠)</label>
+      <input class="form-input" id="pDeadline" type="text">
+    </div>
+    <div>
+      <label class="form-label">고용형태</label>
+      <input class="form-input" id="pEmployment" type="text">
+    </div>
+  </div>
+
+  <label class="form-label">필수조건 (한 줄에 하나)</label>
+  <textarea class="form-input" id="pRequired" rows="5" style="margin-bottom:12px;"></textarea>
+
+  <label class="form-label">우대조건 (한 줄에 하나)</label>
+  <textarea class="form-input" id="pPreferred" rows="4" style="margin-bottom:12px;"></textarea>
+
+  <details style="margin-bottom:12px;">
+    <summary style="cursor:pointer; font-size:13px; color:#6e6e73;">생성된 공고 파일 원문 보기</summary>
+    <div id="jobMarkdown" style="margin-top:8px;"></div>
+  </details>
+
+  <div style="display:flex; justify-content:flex-end; gap:10px;">
+    <button class="btn btn-secondary" onclick="cancelPreview()">취소</button>
+    <button class="btn btn-primary" id="saveBtn" onclick="doSave()">저장 →</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2 style="margin-bottom:12px;">등록된 공고 ({{ jobs|length }})</h2>
+  {% if jobs %}
+  <div style="overflow-x:auto;">
+    <table>
+      <thead>
+        <tr><th>회사</th><th>직무</th><th>마감일</th><th>고용형태</th><th>필수 / 우대</th><th>상태</th></tr>
+      </thead>
+      <tbody>
+        {% for j in jobs %}
+        <tr>
+          <td>{{ j.company }}</td>
+          <td>{{ j.position }}</td>
+          <td>{{ j.deadline }}</td>
+          <td>{{ j.employment_type }}</td>
+          <td>{{ j.required_count }} / {{ j.preferred_count }}</td>
+          <td>
+            {% if j.closed %}<span class="badge badge-warn">마감</span>
+            {% else %}<span class="badge badge-ok">모집중</span>{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty">등록된 공고가 없습니다. 위에서 첫 공고를 등록해보세요.</p>
+  {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let previewData = null;
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function linesToList(text) {
+  return text.split('\n').map(s => s.trim()).filter(Boolean);
+}
+
+async function doPreview() {
+  const raw_text = document.getElementById('rawInput').value.trim();
+  if (!raw_text) { toast('공고 본문을 붙여넣어주세요.'); return; }
+
+  const payload = {
+    raw_text,
+    url: document.getElementById('urlInput').value.trim(),
+    company_hint: document.getElementById('companyHint').value.trim(),
+    position_hint: document.getElementById('positionHint').value.trim(),
+  };
+
+  const btn = document.getElementById('previewBtn');
+  btn.disabled = true; btn.textContent = '파싱 중...';
+  try {
+    const res = await fetch('/jobs/preview', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!data.ok) { toast('⚠️ ' + (data.error || '파싱 실패')); return; }
+    if (data.duplicate) {
+      toast(`이미 등록된 공고입니다: ${data.company} · ${data.position}`);
+      return;
+    }
+    previewData = data;
+    showPreview(data);
+  } catch (e) {
+    toast('⚠️ 요청 중 오류: ' + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = '파싱하기';
+  }
+}
+
+function showPreview(data) {
+  document.getElementById('pCompany').value = data.company || '';
+  document.getElementById('pPosition').value = data.position || '';
+  document.getElementById('pDeadline').value = data.deadline || '';
+  document.getElementById('pEmployment').value = data.employment_type || '';
+  document.getElementById('pRequired').value = (data.required || []).join('\n');
+  document.getElementById('pPreferred').value = (data.preferred || []).join('\n');
+  document.getElementById('jobMarkdown').textContent = data.markdown || '';
+  const card = document.getElementById('previewCard');
+  card.hidden = false;
+  card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function cancelPreview() {
+  previewData = null;
+  document.getElementById('previewCard').hidden = true;
+}
+
+async function doSave() {
+  if (!previewData) return;
+  const payload = Object.assign({}, previewData, {
+    company: document.getElementById('pCompany').value.trim(),
+    position: document.getElementById('pPosition').value.trim(),
+    deadline: document.getElementById('pDeadline').value.trim() || null,
+    employment_type: document.getElementById('pEmployment').value.trim() || null,
+    required: linesToList(document.getElementById('pRequired').value),
+    preferred: linesToList(document.getElementById('pPreferred').value),
+  });
+
+  const btn = document.getElementById('saveBtn');
+  btn.disabled = true; btn.textContent = '저장 중...';
+  try {
+    const res = await fetch('/jobs/save', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!data.ok) { toast('⚠️ ' + (data.error || '저장 실패')); return; }
+    toast((data.duplicate ? '이미 등록되어 있었습니다: ' : '등록 완료: ') + `${data.company} · ${data.position}`);
+    location.reload();
+  } catch (e) {
+    toast('⚠️ 요청 중 오류: ' + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = '저장 →';
+  }
+}
+</script>
+{% endblock %}

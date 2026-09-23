@@ -15,15 +15,13 @@
 ## 마지막 세션
 
 - **날짜**: 2026-09-23
-- **한 일**: S3 전체 완료(S3-5 writing-rules 자동 초안). 이어서 S4-2(공고 파서, lib/job_parser.py
-  + skills/parse-job.md 신규)까지 완료 — 필수/우대조건 배열 분리 추출, 중복판정, 회사명/직무명
-  못 찾을 시 힌트로 보완. 실측 중 "공고 ID"·"수집일"을 모델이 지어내는 문제를 발견해 코드가
-  강제 치환하도록 고침
-- **다음 할 일**: **S4-3 (공고 등록 UI, web/templates/jobs.html 신규)**. lib/job_parser.py 를
-  호출하는 라우트를 web/routes/ 아래 새로 만들어야 함(예: web/routes/jobs.py). URL 입력 또는
-  본문 붙여넣기 폼 → 파싱 결과(회사명/직무명/필수·우대조건) 확인 후 저장. 완료 조건은 브라우저
-  에서 공고 등록 완주. company_hint/position_hint 입력란도 필요(S4-2 실측에서 회사명이 원문에
-  아예 없는 공고가 실제로 있었음)
+- **한 일**: S3 전체 완료(S3-5 writing-rules 자동 초안). S4-2(공고 파서)에 이어 S4-3(공고 등록
+  UI)까지 완료 — 이로써 S4(공고 등록과 파싱) 전체 완료
+- **다음 할 일**: **S5-1 (매처, lib/matcher.py + skills/match-jobs.md 신규)**. jobs 테이블의
+  required_json/preferred_json 각 조건을 사용자 experiences/*.md 와 대조해 충족/부분충족/미충족
+  + 근거 경험 파일명을 매긴다. 점수 = 필수충족률*0.7 + 우대충족률*0.3, 적합(>=80%)/도전(50~80%)/
+  부적합(<50%). 근거 경험 없이 "충족" 판정 금지(1-C). 완료 조건: 공고 5건 매칭 시 모든 판정의
+  근거 파일이 실재함
 - **막힌 것**: 없음
 - **S1-2 설계 메모 — 원본 스킬의 대화형 확인 3곳을 자동화함** (되돌리고 싶으면 web/routes/parse.py 상단 docstring 참고):
   1. 재파싱 여부 → experiences/ 가 있으면 거부, force=1 필요 (신규 파일만 추가하는 기능은 없음. 전체 재파싱만)
@@ -280,6 +278,34 @@
   맞추기)는 하지 않음 — 원문 표현을 그대로 둠. S5(매칭 엔진)에서 이 값을 직접 비교해야 한다면
   그때 정규화를 추가한다
 
+- **S4-3 구현**: lib/job_parser.py 를 preview()/commit() 두 단계로 나눔 (기존 parse_and_save() 는
+  둘을 이어 부르는 래퍼로 남겨 하위호환 유지 — S4-2 테스트 17개 전부 무수정으로 통과). preview()
+  는 LLM 만 부르고 DB/파일에 아무 것도 안 쓴다. web/routes/jobs.py (신규) — GET /jobs(목록+등록
+  폼), POST /jobs/preview(파싱만), POST /jobs/save(확인 후 실제 저장). elicit.py 와 같은 이유로
+  서버 세션을 안 쓰고, preview 결과 전체(마크다운·필수/우대조건·회사명 등)를 클라이언트가 들고
+  있다가 "저장" 클릭 시 그대로(또는 사용자가 고친 값으로) 되돌려보낸다. web/templates/jobs.html
+  (신규) — 본문 붙여넣기 폼 → 파싱 결과를 회사명/직무명/마감일/필수·우대조건 모두 수정 가능한
+  입력창으로 보여줌 → 저장. 등록된 공고 목록 표도 같은 페이지에 표시
+  - **구현 중 발견/수정**: jobs 라우트가 SQLite 를 직접 조회하는 첫 라우트인데, 기존
+    web/__init__.py 의 create_app() 은 PROJECT_ROOT 만 테스트 주입이 가능했고 DB 경로는 항상
+    lib.config.db_path()(.env 의 실제 DB_PATH)를 썼다 — 그대로 두면 이 라우트를 테스트할 때마다
+    실제 프로젝트 data/app.db 를 건드리게 된다. web/__init__.py 에 app.config['DB_PATH'] 를
+    추가해 PROJECT_ROOT 와 같은 방식으로 테스트가 임시 DB 를 주입할 수 있게 함
+  - base.html 네비게이션에 "공고" 링크 추가 (전역 데이터라 사용자별 페이지가 아님)
+- **완료 조건 실측**: Flask 테스트 클라이언트로 실제 브라우저 흐름 재현(임시 PROJECT_ROOT + 임시
+  DB, 실제 API 호출) — POST /jobs/preview(UX 디자이너 공고 원문) → 응답에서 필수 3개/우대 2개
+  정상 추출 및 preview 단계에 DB/파일 미기록 확인 → 그 응답을 그대로 POST /jobs/save → jobs 테이블
+  1행 + jobs/manual-0001.md 실제 저장 확인(공고 ID·수집일도 정확) → GET /jobs 목록에 회사명/
+  직무명 등장 확인 → 같은 원문을 다시 /jobs/preview 하면 LLM 재호출 없이 duplicate=True 로 응답
+  하는 것까지 확인. "브라우저에서 공고 등록 완주" 완료 조건 충족. 실제 프로젝트 jobs/, data/app.db
+  는 건드리지 않음(테스트 전후 jobs 테이블 행수 0 확인)
+- **S4-3 테스트**: tests/test_jobs.py 8개 (페이지 렌더, DB_PATH 격리 회귀 방지, preview/save
+  스텁 검증, 사용자 수정값 전달, 목록 반영). tests/test_web_security.py 라우트 테이블에 /jobs,
+  /jobs/preview, /jobs/save 3개 추가. 전체 137개 통과, API 비용 없음(실측은 별도 스크립트)
+- **S4-3 알려진 한계**: required/preferred 편집창은 "한 줄에 하나"만 지원 — 항목 안에 줄바꿈이
+  들어간 조건은 표현할 수 없다(원문 자체가 그런 경우는 실측 범위에서 없었음). 공고 목록에 삭제/
+  수정 기능은 없음(등록만 가능 — 수정이 필요해지면 S9 지원현황 관리와 함께 다룰 만함)
+
 ---
 
 ## 체크리스트
@@ -325,7 +351,8 @@
 - [x] S4-1 공고 포맷 (templates/job-entry.md) — 2026-09-21
 - [x] S4-2 공고 파서 (lib/job_parser.py, skills/parse-job.md) — 2026-09-23 (완료 조건 실측:
   업종·표기방식이 다른 합성 공고 3건 모두 필수/우대조건 배열 정상 분리 추출)
-- [ ] S4-3 공고 등록 UI (jobs.html)
+- [x] S4-3 공고 등록 UI (jobs.html) — 2026-09-23 (완료 조건 실측: Flask 테스트 클라이언트로
+  실제 브라우저 흐름 재현 — preview → save → 목록 반영 → 재파싱 시 중복판정, 실제 API 사용)
 
 ### S5. 매칭 엔진
 
