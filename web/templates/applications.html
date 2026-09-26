@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block title %}지원 현황 — {{ user }}{% endblock %}
+
+{% block content %}
+<style>
+  .status-badge { display:inline-block; padding:2px 10px; border-radius:99px; font-size:11px; font-weight:600; }
+  .status-관심 { background:#e8e8ed; color:#3a3a3c; }
+  .status-준비중 { background:#fff3cd; color:#856404; }
+  .status-지원완료 { background:#d0e7ff; color:#004a99; }
+  .status-합격 { background:#d1e7dd; color:#0a3622; }
+  .status-불합격 { background:#fde2e1; color:#8a1c1c; }
+  .status-대기 { background:#e8e8ed; color:#6e6e73; }
+
+  .history-row { display:none; background:#f5f5f7; }
+  .history-row td { padding:12px 16px; }
+  .history-item { font-size:12px; color:#6e6e73; padding:3px 0; }
+  .history-item b { color:#1d1d1f; }
+  select.status-select { font-size:12px; padding:4px 8px; border-radius:6px; border:1px solid #d2d2d7; }
+</style>
+
+<div style="margin-bottom:20px; font-size:13px; color:#6e6e73;">
+  <a href="/">홈</a>
+  <span style="margin:0 6px;">›</span>
+  <a href="/user/{{ user }}">{{ user }}</a>
+  <span style="margin:0 6px;">›</span>
+  지원 현황
+</div>
+
+<h1 style="margin-bottom:16px;">지원 현황</h1>
+
+<div class="card">
+  <h2 style="margin-bottom:10px; font-size:14px;">관심 등록</h2>
+  {% if available %}
+  <div style="display:flex; gap:8px;">
+    <select class="form-input" id="availableSelect" style="flex:1;">
+      {% for j in available %}
+      <option value="{{ j.id }}">{{ j.company }} · {{ j.position }}</option>
+      {% endfor %}
+    </select>
+    <button class="btn btn-primary" onclick="registerInterest()">관심 등록</button>
+  </div>
+  {% else %}
+  <p class="empty">등록할 수 있는 새 공고가 없습니다. <a href="/jobs">공고 등록하기 →</a></p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2 style="margin-bottom:12px;">내 지원 목록 ({{ apps|length }})</h2>
+  {% if apps %}
+  <div style="overflow-x:auto;">
+    <table id="appTable">
+      <thead>
+        <tr><th>공고</th><th>마감일</th><th>상태</th><th></th></tr>
+      </thead>
+      <tbody>
+        {% for a in apps %}
+        <tr>
+          <td>{{ a.company }} · {{ a.position }}</td>
+          <td>{{ a.deadline or '상시' }}</td>
+          <td>
+            <span class="status-badge status-{{ a.status }}">{{ a.status }}</span>
+            <select class="status-select" onchange="changeStatus({{ a.job_id }}, this.value, this)">
+              <option value="">상태 변경...</option>
+              {% for s in statuses %}
+              <option value="{{ s }}" {% if s == a.status %}disabled{% endif %}>{{ s }}</option>
+              {% endfor %}
+            </select>
+          </td>
+          <td><button class="btn btn-secondary btn-sm" onclick="toggleHistory({{ a.job_id }})">이력 보기</button></td>
+        </tr>
+        <tr class="history-row" id="history-{{ a.job_id }}">
+          <td colspan="4"><div id="history-body-{{ a.job_id }}">불러오는 중...</div></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty">아직 등록한 지원이 없습니다. 위에서 관심 있는 공고를 등록해보세요.</p>
+  {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function registerInterest() {
+  const jobId = document.getElementById('availableSelect').value;
+  if (!jobId) return;
+  const res = await fetch(`/applications/{{ user }}/${jobId}/status`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: '관심', note: '관심 등록' }),
+  }).then(r => r.json());
+  if (res.success) { toast('관심 등록 완료'); location.reload(); }
+  else toast('⚠️ ' + (res.error || '등록 실패'));
+}
+
+async function changeStatus(jobId, status, selectEl) {
+  if (!status) return;
+  const res = await fetch(`/applications/{{ user }}/${jobId}/status`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status, note: '' }),
+  }).then(r => r.json());
+  selectEl.value = '';
+  if (res.success) { toast(`상태 변경: ${status}`); location.reload(); }
+  else toast('⚠️ ' + (res.error || '변경 실패'));
+}
+
+const loadedHistory = new Set();
+
+async function toggleHistory(jobId) {
+  const row = document.getElementById(`history-${jobId}`);
+  const visible = row.style.display === 'table-row';
+  row.style.display = visible ? 'none' : 'table-row';
+  if (!visible && !loadedHistory.has(jobId)) {
+    loadedHistory.add(jobId);
+    const data = await fetch(`/applications/{{ user }}/${jobId}/history`).then(r => r.json());
+    const body = document.getElementById(`history-body-${jobId}`);
+    body.innerHTML = data.history.map(h =>
+      `<div class="history-item">${h.created_at} — ${h.from_status ? h.from_status + ' → ' : ''}<b>${h.to_status}</b>${h.note ? ' (' + escapeHtml(h.note) + ')' : ''}</div>`
+    ).join('');
+  }
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+</script>
+{% endblock %}
