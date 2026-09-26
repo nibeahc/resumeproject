@@ -18,12 +18,25 @@ import re
 import threading
 from pathlib import Path
 
-from flask import Blueprint, Response, redirect, render_template, request, stream_with_context, url_for
+from flask import (Blueprint, Response, current_app, jsonify, redirect, render_template,
+                   request, stream_with_context, url_for)
 
+from lib import db, matcher, portfolio, resume
 from lib.llm import stream_complete
+from lib.resume import _safe_folder_name
 from lib.selector import select as select_experiences
 from lib.skills import load_skill
+from web.data import get_open_jobs
 from web.paths import output_dir, project_root, safe_path, user_dir, valid_segment
+
+
+def _db_path():
+    """S7-3(bundle)이 SQLite(jobs/matches)를 건드리는 첫 지점이다. web/routes/jobs.py,
+    matches.py 와 같은 이유로 DB_PATH 설정을 존중한다 — 안 그러면 테스트가 실제 프로젝트
+    DB(data/app.db)를 건드리게 된다."""
+    path = current_app.config.get('DB_PATH')
+    db.init_db(path)
+    return path
 
 bp = Blueprint('generate', __name__)
 
@@ -34,7 +47,8 @@ def generate_page(name):
         return redirect(url_for('main.index'))
     exp_dir = user_dir(name) / 'experiences'
     exp_count = len(list(exp_dir.glob('*.md'))) if exp_dir.exists() else 0
-    return render_template('generate.html', user=name, exp_count=exp_count)
+    jobs = get_open_jobs(db_path=_db_path())  # S7-3: 공고에서 불러오기 드롭다운
+    return render_template('generate.html', user=name, exp_count=exp_count, jobs=jobs)
 
 _ANSWER_BLOCK = re.compile(r'===ANSWER===\n(?P<body>.*?)\n===END===', re.S)
 _META_BLOCK = re.compile(r'===META===\n(?P<body>.*?)\n===END===', re.S)
@@ -171,10 +185,11 @@ def sse(event, data):
     return f'event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n'
 
 
-@bp.route('/generate/<name>', methods=['POST'])
-def generate(name):
-    root = user_dir(name)
-    data = request.get_json(silent=True) or request.form
+def _validate_generate_params(data):
+    """company/position/question/char_limit 검증. (errors, company, position, question,
+    char_limit, count_mode, override_files) 를 돌려준다 — SSE 제너레이터가 시작되기 *전에*
+    동기적으로 끝내야 한다 (S1-3 에서 겪은, 제너레이터 안에서 abort/에러 내면 이미 200이
+    나간 뒤라 늦다는 패턴을 여기서도 피한다)."""
     company = (data.get('company') or '').strip()
     position = (data.get('position') or '').strip()
     question = (data.get('question') or '').strip()
@@ -201,128 +216,139 @@ def generate(name):
         char_limit = None
         errors.append('글자수(char_limit)가 없거나 올바르지 않습니다. 반드시 숫자로 지정해야 합니다.')
 
-    # experience_files: S3-2 UI 가 사용자의 직접 선택을 강제할 때 쓴다. JSON 배열이나
-    # 콤마 구분 문자열 둘 다 받는다. 존재하지 않는 파일명은 selector.select() 가 조용히 무시한다.
     override_files = data.get('experience_files')
     if isinstance(override_files, str):
         override_files = [f.strip() for f in override_files.split(',') if f.strip()]
 
-    if errors:
-        def bad():
-            yield sse('error', {'message': ' '.join(errors)})
-        return Response(bad(), mimetype='text/event-stream')
+    return errors, company, position, question, char_limit, count_mode, override_files
 
+
+def coverletter_events(name, root, company, position, question, char_limit, count_mode,
+                        override_files=None, folder_name=None):
+    """자소서 한 문항을 생성해 저장하고, (event, data) 튜플을 yield 하는 순수 제너레이터.
+
+    /generate/<name> (단독 생성)과 /generate/<name>/bundle (S7-3 공고 연동 일괄 생성) 양쪽에서
+    그대로 재사용한다 — 두 라우트가 이 로직을 복제하면 언젠가 하나만 고치고 잊어버리게 된다.
+    folder_name 을 주면 outputs/[이름]/[folder_name]/ 에 저장한다(lib/resume.py, lib/portfolio.py
+    와 폴더를 통일하려는 것 — 공고 연동 시엔 회사명/직무명이 공고 레코드에서 오므로 그 값 그대로
+    폴더명을 만들면 안전하지 않을 수 있어 호출자가 이미 정리한 폴더명을 넘긴다). 안 주면 기존처럼
+    [기업명]_[직무명] 을 그대로 쓴다(이 경우 company/position 은 이미 valid_segment() 를 통과한
+    값이어야 한다 — 단독 라우트가 그렇게 보장한다).
+
+    root 는 이미 검증된 user_dir(name) 이다 — 이 함수 자체는 name 으로 다시 경로를 만들지 않는다
+    (제너레이터 시작 전에 이미 끝났어야 할 검증을 여기서 반복하지 않기 위해).
+    """
     exp_dir = root / 'experiences'
-    has_experiences = exp_dir.exists() and any(exp_dir.glob('*.md'))
+    if not (exp_dir.exists() and any(exp_dir.glob('*.md'))):
+        yield 'error', {'message': '경험 파일이 없습니다. 먼저 파싱을 진행하세요.'}
+        return
 
-    def stream():
-        if not has_experiences:
-            yield sse('error', {'message': '경험 파일이 없습니다. 먼저 파싱을 진행하세요.'})
-            return
+    profile_text = read_if_exists(root / 'profile.md')
+    style_text = read_if_exists(root / 'writing-style.md')
+    rules_text = read_if_exists(root / 'writing-rules.md')
+    interest_text = read_if_exists(root / '관심직무.md')
+    company_text = read_if_exists(project_root() / 'companies' / f'{company}.md')
 
-        profile_text = read_if_exists(root / 'profile.md')
-        style_text = read_if_exists(root / 'writing-style.md')
-        rules_text = read_if_exists(root / 'writing-rules.md')
-        interest_text = read_if_exists(root / '관심직무.md')
-        company_text = read_if_exists(project_root() / 'companies' / f'{company}.md')
+    ref_dir = project_root() / 'references' / 'coverletter' / position
+    reference_texts = []
+    if ref_dir.exists():
+        for f in sorted(ref_dir.glob('*.md'))[:3]:
+            reference_texts.append((f.name, f.read_text(encoding='utf-8')))
 
-        ref_dir = project_root() / 'references' / 'coverletter' / position
-        reference_texts = []
-        if ref_dir.exists():
-            for f in sorted(ref_dir.glob('*.md'))[:3]:
-                reference_texts.append((f.name, f.read_text(encoding='utf-8')))
+    # Step 5~7: 경험 선택은 LLM 이 아니라 코드가 한다 (S3-1). 선택된 것만 프롬프트에 실린다.
+    selection = select_experiences(exp_dir, question, interest_text=interest_text,
+                                    max_count=2, override_filenames=override_files)
+    selected_experiences = [(c.experience.filename, c.experience.path.read_text(encoding='utf-8'))
+                             for c in selection['selected']]
+    yield 'progress', {
+        'stage': 'selected',
+        'question_type': selection['question_type'],
+        'selected': [{'filename': c.experience.filename, 'title': c.experience.title,
+                      'score': c.score, 'reasons': c.reasons} for c in selection['selected']],
+        'candidates': [{'filename': c.experience.filename, 'title': c.experience.title,
+                        'score': c.score, 'reasons': c.reasons} for c in selection['candidates'][:6]],
+    }
 
-        # Step 5~7: 경험 선택은 LLM 이 아니라 코드가 한다 (S3-1). 선택된 것만 프롬프트에 실린다.
-        selection = select_experiences(exp_dir, question, interest_text=interest_text,
-                                        max_count=2, override_filenames=override_files)
-        selected_experiences = [(c.experience.filename, c.experience.path.read_text(encoding='utf-8'))
-                                 for c in selection['selected']]
-        yield sse('progress', {
-            'stage': 'selected',
-            'question_type': selection['question_type'],
-            'selected': [{'filename': c.experience.filename, 'title': c.experience.title,
-                          'score': c.score, 'reasons': c.reasons} for c in selection['selected']],
-            'candidates': [{'filename': c.experience.filename, 'title': c.experience.title,
-                            'score': c.score, 'reasons': c.reasons} for c in selection['candidates'][:6]],
-        })
+    yield 'progress', {'stage': 'context_ready', 'experiences': len(selected_experiences),
+                        'company_cached': bool(company_text.strip()), 'references': len(reference_texts)}
 
-        yield sse('progress', {'stage': 'context_ready', 'experiences': len(selected_experiences),
-                                'company_cached': bool(company_text.strip()), 'references': len(reference_texts)})
+    system = load_skill('write-coverletter')
+    user_msg = build_prompt(name, company, position, question, char_limit, count_mode,
+                             profile_text, style_text, rules_text, interest_text,
+                             company_text, reference_texts, selected_experiences)
+    messages = [{'role': 'user', 'content': user_msg}]
 
-        system = load_skill('write-coverletter')
-        user_msg = build_prompt(name, company, position, question, char_limit, count_mode,
-                                 profile_text, style_text, rules_text, interest_text,
-                                 company_text, reference_texts, selected_experiences)
-        messages = [{'role': 'user', 'content': user_msg}]
+    def call_llm(msgs):
+        q = queue.Queue()
 
-        def call_llm(msgs):
-            q = queue.Queue()
+        def worker():
+            try:
+                result = stream_complete(system=system, messages=msgs, max_tokens=3000,
+                                          on_delta=lambda c: q.put(('delta', c)))
+                q.put(('done', result))
+            except Exception as e:  # noqa: BLE001
+                q.put(('error', str(e)))
 
-            def worker():
-                try:
-                    result = stream_complete(system=system, messages=msgs, max_tokens=3000,
-                                              on_delta=lambda c: q.put(('delta', c)))
-                    q.put(('done', result))
-                except Exception as e:  # noqa: BLE001
-                    q.put(('error', str(e)))
+        threading.Thread(target=worker, daemon=True).start()
+        chars_since_last = 0
+        while True:
+            kind, payload = q.get()
+            if kind == 'delta':
+                chars_since_last += len(payload)
+                if chars_since_last >= 200:
+                    yield 'progress', {'stage': 'generating'}
+                    chars_since_last = 0
+                continue
+            if kind == 'error':
+                raise RuntimeError(payload)
+            return payload
 
-            threading.Thread(target=worker, daemon=True).start()
-            chars_since_last = 0
-            while True:
-                kind, payload = q.get()
-                if kind == 'delta':
-                    chars_since_last += len(payload)
-                    if chars_since_last >= 200:
-                        yield sse('progress', {'stage': 'generating'})
-                        chars_since_last = 0
-                    continue
-                if kind == 'error':
-                    raise RuntimeError(payload)
-                return payload
+    try:
+        result = yield from call_llm(messages)
+    except RuntimeError as e:
+        yield 'error', {'message': f'LLM 호출 실패: {e}'}
+        return
 
+    answer, meta = parse_answer(result['text'])
+    actual = count_chars(answer, count_mode)
+    yield 'progress', {'stage': 'draft', 'chars': actual, 'limit': char_limit}
+
+    # exceeded 는 "초과했다" 라는 뜻 그대로 유지한다 (파일 경고, 완료 이벤트, ROADMAP 완료 조건이
+    # 전부 이 이름으로 추적한다). 재시도를 시킬지 여부(needs_retry)는 이보다 넓다 — 스킬 Step 9 가
+    # "여유 있게 짧게 쓰는 것 금지" 라고 못박았으므로, 많이 모자란 경우도 다시 시킨다.
+    retries = 0
+    exceeded = actual > char_limit
+    needs_retry = exceeded or abs(actual - char_limit) / char_limit > 0.05
+    while needs_retry and retries < MAX_RETRIES:
+        retries += 1
+        yield 'progress', {'stage': 'retry', 'attempt': retries, 'diff': actual - char_limit}
+        messages = messages + [
+            {'role': 'assistant', 'content': result['text']},
+            {'role': 'user', 'content': build_retry_prompt(char_limit, count_mode, actual)},
+        ]
         try:
             result = yield from call_llm(messages)
         except RuntimeError as e:
-            yield sse('error', {'message': f'LLM 호출 실패: {e}'})
+            yield 'error', {'message': f'재시도 중 LLM 호출 실패: {e}'}
             return
-
         answer, meta = parse_answer(result['text'])
         actual = count_chars(answer, count_mode)
-        yield sse('progress', {'stage': 'draft', 'chars': actual, 'limit': char_limit})
-
-        # exceeded 는 "초과했다" 라는 뜻 그대로 유지한다 (파일 경고, 완료 이벤트, ROADMAP 완료 조건이
-        # 전부 이 이름으로 추적한다). 재시도를 시킬지 여부(needs_retry)는 이보다 넓다 — 스킬 Step 9 가
-        # "여유 있게 짧게 쓰는 것 금지" 라고 못박았으므로, 많이 모자란 경우도 다시 시킨다.
-        retries = 0
         exceeded = actual > char_limit
         needs_retry = exceeded or abs(actual - char_limit) / char_limit > 0.05
-        while needs_retry and retries < MAX_RETRIES:
-            retries += 1
-            yield sse('progress', {'stage': 'retry', 'attempt': retries, 'diff': actual - char_limit})
-            messages = messages + [
-                {'role': 'assistant', 'content': result['text']},
-                {'role': 'user', 'content': build_retry_prompt(char_limit, count_mode, actual)},
-            ]
-            try:
-                result = yield from call_llm(messages)
-            except RuntimeError as e:
-                yield sse('error', {'message': f'재시도 중 LLM 호출 실패: {e}'})
-                return
-            answer, meta = parse_answer(result['text'])
-            actual = count_chars(answer, count_mode)
-            exceeded = actual > char_limit
-            needs_retry = exceeded or abs(actual - char_limit) / char_limit > 0.05
 
-        if not answer:
-            yield sse('error', {'message': 'LLM 출력에서 ANSWER 블록을 찾지 못했습니다.', 'raw': result['text'][:500]})
-            return
+    if not answer:
+        yield 'error', {'message': 'LLM 출력에서 ANSWER 블록을 찾지 못했습니다.', 'raw': result['text'][:500]}
+        return
 
-        out_dir = output_dir(name)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = safe_path(out_dir, f'{company}_{position}.md')
-        today = __import__('datetime').date.today().strftime('%Y.%m.%d')
-        exceeded_note = f'\n⚠️ 글자수 초과: {actual}자 (제한 {char_limit}자, {actual - char_limit}자 초과, 재시도 {retries}회 후에도 초과)\n' if exceeded else ''
-        entry = f"""## {question}
+    # S7 부터 이력서(lib/resume.py)·포트폴리오(lib/portfolio.py)가 outputs/[이름]/[기업]_[직무]/
+    # 서브폴더에 저장하기 시작했다. 자소서만 플랫 파일로 따로 두면 S7-3(일괄 생성)에서 세 문서가
+    # 한 폴더에 모이지 않으니, 여기도 같은 서브폴더 구조로 맞춘다.
+    out_dir = output_dir(name)
+    out_path = safe_path(out_dir, folder_name or f'{company}_{position}', '자소서.md')
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    today = __import__('datetime').date.today().strftime('%Y.%m.%d')
+    exceeded_note = f'\n⚠️ 글자수 초과: {actual}자 (제한 {char_limit}자, {actual - char_limit}자 초과, 재시도 {retries}회 후에도 초과)\n' if exceeded else ''
+    entry = f"""## {question}
 글자수: {actual}자 ({'공백 포함' if count_mode == '포함' else '공백 제외'}, 목표 {char_limit}자){exceeded_note}
 
 {answer}
@@ -331,21 +357,126 @@ def generate(name):
 {meta}
 작성일: {today}
 """
-        if out_path.exists():
-            out_path.write_text(out_path.read_text(encoding='utf-8').rstrip() + '\n\n' + entry, encoding='utf-8')
-        else:
-            out_path.write_text(f'# {company} {position}\n\n{entry}', encoding='utf-8')
+    if out_path.exists():
+        out_path.write_text(out_path.read_text(encoding='utf-8').rstrip() + '\n\n' + entry, encoding='utf-8')
+    else:
+        out_path.write_text(f'# {company} {position}\n\n{entry}', encoding='utf-8')
+
+    yield 'done', {
+        'answer': answer,
+        'meta': meta,
+        'chars': actual,
+        'limit': char_limit,
+        'count_mode': count_mode,
+        'exceeded': exceeded,
+        'retries': retries,
+        'saved_to': str(out_path.relative_to(project_root().resolve())),
+        'used_experiences': [fn for fn, _ in selected_experiences],  # 코드가 실제로 고른 파일 (LLM 자체보고가 아니다)
+    }
+
+
+@bp.route('/generate/<name>', methods=['POST'])
+def generate(name):
+    root = user_dir(name)
+    data = request.get_json(silent=True) or request.form
+    errors, company, position, question, char_limit, count_mode, override_files = _validate_generate_params(data)
+
+    if errors:
+        def bad():
+            yield sse('error', {'message': ' '.join(errors)})
+        return Response(bad(), mimetype='text/event-stream')
+
+    def stream():
+        for event, ev_data in coverletter_events(name, root, company, position, question,
+                                                  char_limit, count_mode, override_files):
+            yield sse(event, ev_data)
+
+    return Response(stream_with_context(stream()), mimetype='text/event-stream')
+
+
+@bp.route('/generate/<name>/bundle', methods=['POST'])
+def generate_bundle(name):
+    """ROADMAP S7-3: 공고 하나를 고르면 이력서·자소서·포트폴리오 초안을 한 번에 생성한다.
+
+    이력서(lib/resume.py)와 포트폴리오(lib/portfolio.py)는 매칭 결과(matches 테이블)의 근거
+    경험을 재사용하므로, 이 공고를 아직 매칭한 적이 없으면 먼저 매칭부터 실행한다.
+    """
+    db_path = _db_path()
+
+    root = user_dir(name)
+    data = request.get_json(silent=True) or request.form
+    job_id_raw = (data.get('job_id') or '').strip()
+    if not job_id_raw.isdigit():
+        return jsonify(success=False, error='공고를 선택해주세요.'), 400
+
+    errors, _, _, question, char_limit, count_mode, override_files = _validate_generate_params(
+        {**data, 'company': 'x', 'position': 'x'})  # company/position 은 공고에서 가져오므로 폼 값 검증은 건너뜀
+    errors = [e for e in errors if '기업명' not in e and '직무명' not in e]
+    if errors:
+        def bad():
+            yield sse('error', {'message': ' '.join(errors)})
+        return Response(bad(), mimetype='text/event-stream')
+
+    job_id = int(job_id_raw)
+
+    def stream():
+        conn = db.get_conn(db_path)
+        job_row = conn.execute('SELECT * FROM jobs WHERE id = ?', (job_id,)).fetchone()
+        if not job_row:
+            conn.close()
+            yield sse('error', {'message': f'공고를 찾을 수 없습니다 (id={job_id}).'})
+            return
+        job = dict(job_row)
+        company, position = job['company'], job['position']
+        # resume/portfolio 와 같은 규칙으로 폴더명을 정리한다 — 공고 레코드의 회사명/직무명은
+        # job_parser.commit() 이 파일시스템 안전성까지는 보지 않은 값이라 그대로 못 믿는다.
+        folder_name = _safe_folder_name(company, position)
+
+        exp_dir = root / 'experiences'
+        match_row = conn.execute(
+            'SELECT id FROM matches WHERE user = ? AND job_id = ? ORDER BY id DESC LIMIT 1', (name, job_id),
+        ).fetchone()
+        conn.close()
+        if not match_row:
+            yield sse('progress', {'doc': 'match', 'stage': 'start'})
+            mr = matcher.match_job(name, job_id, exp_dir, db_path=db_path)
+            if not mr.ok:
+                yield sse('error', {'message': f'매칭 실패: {mr.error}'})
+                return
+            yield sse('progress', {'doc': 'match', 'stage': 'done', 'score': round(mr.score, 1), 'category': mr.category})
+
+        yield sse('progress', {'doc': 'resume', 'stage': 'start'})
+        profile_text = read_if_exists(root / 'profile.md')
+        rr = resume.generate_resume(name, job_id, exp_dir, profile_text=profile_text,
+                                     db_path=db_path, output_dir=output_dir(name))
+        yield sse('progress', {'doc': 'resume', 'stage': 'done', 'ok': rr.ok, 'path': rr.path, 'error': rr.error})
+
+        yield sse('progress', {'doc': 'portfolio', 'stage': 'start'})
+        style_text = read_if_exists(root / 'writing-style.md')
+        interest_text = read_if_exists(root / '관심직무.md')
+        pr = portfolio.generate_portfolio(name, exp_dir, job_id=job_id, profile_text=profile_text,
+                                           writing_style_text=style_text, interest_text=interest_text,
+                                           db_path=db_path, output_dir=output_dir(name))
+        yield sse('progress', {'doc': 'portfolio', 'stage': 'done', 'ok': pr.ok, 'path': pr.path, 'error': pr.error})
+
+        coverletter_ok, coverletter_error, coverletter_path = False, None, None
+        for event, ev_data in coverletter_events(name, root, company, position, question, char_limit,
+                                                  count_mode, override_files, folder_name=folder_name):
+            tagged = dict(ev_data)
+            tagged['doc'] = 'coverletter'
+            if event == 'done':
+                coverletter_ok = True
+                coverletter_path = ev_data.get('saved_to')
+            elif event == 'error':
+                coverletter_error = ev_data.get('message')
+            yield sse('progress', tagged)
 
         yield sse('done', {
-            'answer': answer,
-            'meta': meta,
-            'chars': actual,
-            'limit': char_limit,
-            'count_mode': count_mode,
-            'exceeded': exceeded,
-            'retries': retries,
-            'saved_to': str(out_path.relative_to(project_root().resolve())),
-            'used_experiences': [fn for fn, _ in selected_experiences],  # 코드가 실제로 고른 파일 (LLM 자체보고가 아니다)
+            'resume_ok': rr.ok, 'resume_path': rr.path,
+            'portfolio_ok': pr.ok, 'portfolio_path': pr.path,
+            'coverletter_ok': coverletter_ok, 'coverletter_path': coverletter_path,
+            'coverletter_error': coverletter_error,
+            'folder': folder_name,
         })
 
     return Response(stream_with_context(stream()), mimetype='text/event-stream')

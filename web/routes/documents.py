@@ -62,18 +62,22 @@ def raw_fallback(name):
     return jsonify(success=True, saved_as=fallback_name)
 
 
-@bp.route('/output/<name>/<filename>')
+@bp.route('/output/<name>/<path:filename>')
 def view_output(name, filename):
-    p = safe_path(project_root() / 'outputs', name, filename)
+    # S7 부터 outputs/[이름]/[기업]_[직무]/*.md 처럼 한 단계 서브폴더가 생겨서 filename 에
+    # "/" 가 들어올 수 있다 (path 컨버터는 슬래시를 허용한다). safe_path() 는 각 조각을
+    # 개별적으로 valid_segment() 검사하므로, 여기서 미리 "/" 로 쪼개 넘긴다 — 조각 중 하나라도
+    # ".." 같은 위험한 값이면 그대로 400 이 난다.
+    p = safe_path(project_root() / 'outputs', name, *filename.split('/'))
     if not p.exists():
         return '파일을 찾을 수 없습니다.', 404
     return render_template('editor.html', user=name, filename=filename,
                            content=p.read_text(encoding='utf-8'), kind='output')
 
 
-@bp.route('/output/<name>/<filename>/save', methods=['POST'])
+@bp.route('/output/<name>/<path:filename>/save', methods=['POST'])
 def save_output(name, filename):
-    p = safe_path(project_root() / 'outputs', name, filename)
+    p = safe_path(project_root() / 'outputs', name, *filename.split('/'))
     p.write_text(request.json.get('content', ''), encoding='utf-8')
     return jsonify(success=True)
 

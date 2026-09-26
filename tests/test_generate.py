@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from lib import portfolio as portfolio_module  # noqa: E402
 from web import create_app  # noqa: E402
 from web.routes import generate as generate_route  # noqa: E402
 
@@ -51,7 +52,9 @@ class GeneratePageTest(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.root = self.tmp / 'root'
         (self.root / 'users' / '홍길동').mkdir(parents=True)
-        app = create_app({'PROJECT_ROOT': self.root, 'TESTING': True})
+        # S7-3: GET /generate/<name> 이 공고 드롭다운을 채우려고 jobs 테이블을 본다 — DB_PATH 를
+        # 임시 경로로 주지 않으면 실제 프로젝트 data/app.db 를 건드리게 된다.
+        app = create_app({'PROJECT_ROOT': self.root, 'DB_PATH': self.tmp / 'app.db', 'TESTING': True})
         self.c = app.test_client()
 
     def tearDown(self):
@@ -89,6 +92,32 @@ class GeneratePageTest(unittest.TestCase):
         self.assertIn('id="candList"', body)
         self.assertIn('id="regenBtn"', body)
         self.assertIn('onclick="regenerate()"', body)
+
+    def test_job_dropdown_empty_without_jobs(self):
+        r = self.c.get('/generate/홍길동')
+        body = r.get_data(as_text=True)
+        self.assertIn('id="jobSelect"', body)
+        self.assertIn('직접 입력', body)
+
+    def test_job_dropdown_lists_open_jobs_only(self):
+        """S7-3: 공고 드롭다운은 마감 안 된 공고만 보여준다."""
+        from lib import db
+        db.init_db(self.tmp / 'app.db')
+        conn = db.get_conn(self.tmp / 'app.db')
+        conn.execute(
+            "INSERT INTO jobs (source, source_job_id, company, position, required_json, preferred_json, closed) "
+            "VALUES ('manual','0001','열린회사','백엔드','[]','[]', 0)")
+        conn.execute(
+            "INSERT INTO jobs (source, source_job_id, company, position, required_json, preferred_json, closed) "
+            "VALUES ('manual','0002','마감회사','프론트엔드','[]','[]', 1)")
+        conn.commit()
+        conn.close()
+
+        r = self.c.get('/generate/홍길동')
+        body = r.get_data(as_text=True)
+        self.assertIn('열린회사', body)
+        self.assertNotIn('마감회사', body)
+        self.assertIn('id="bundleBtn"', body)
 
 
 class GenerateRouteTest(unittest.TestCase):
@@ -146,7 +175,7 @@ class GenerateRouteTest(unittest.TestCase):
         self.assertEqual(m.call_count, 1)  # 재시도 없어야 함
         self.assertIn('"chars": 97', body)
         self.assertIn('"exceeded": false', body)
-        saved = (self.root / 'outputs' / '홍길동' / '테스트기업_테스트직무.md').read_text(encoding='utf-8')
+        saved = (self.root / 'outputs' / '홍길동' / '테스트기업_테스트직무' / '자소서.md').read_text(encoding='utf-8')
         self.assertIn(answer, saved)
         self.assertIn('97자', saved)
 
@@ -182,7 +211,7 @@ class GenerateRouteTest(unittest.TestCase):
             body = r.get_data(as_text=True)
         self.assertEqual(m.call_count, 2)  # MAX_RETRIES=1 이니 두 번째에서 멈춰야 함
         self.assertIn('"exceeded": true', body)
-        saved = (self.root / 'outputs' / '홍길동' / '테스트기업_테스트직무.md').read_text(encoding='utf-8')
+        saved = (self.root / 'outputs' / '홍길동' / '테스트기업_테스트직무' / '자소서.md').read_text(encoding='utf-8')
         self.assertIn('⚠️ 글자수 초과', saved)  # 저장은 하되 숨기지 않고 경고를 남긴다
 
     def test_count_mode_excludes_whitespace(self):
@@ -195,7 +224,8 @@ class GenerateRouteTest(unittest.TestCase):
         self.assertIn('"exceeded": false', body)
 
     def test_appends_to_existing_output_file(self):
-        out = self.root / 'outputs' / '홍길동' / '테스트기업_테스트직무.md'
+        out = self.root / 'outputs' / '홍길동' / '테스트기업_테스트직무' / '자소서.md'
+        out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text('# 테스트기업 테스트직무\n\n## 기존 문항\n기존 내용\n', encoding='utf-8')
         fake = llm_result('===ANSWER===\n새 답변\n===END===\n===META===\n참조한 경험: x\n===END===\n')
         with patch.object(generate_route, 'stream_complete', return_value=fake):
@@ -263,6 +293,155 @@ class GenerateRouteTest(unittest.TestCase):
             body = r.get_data(as_text=True)
         self.assertIn('직무명', body)
         m.assert_not_called()
+
+
+class GenerateBundleTest(unittest.TestCase):
+    """S7-3: 공고 하나를 고르면 이력서·자소서·포트폴리오를 한 번에 생성한다."""
+
+    def setUp(self):
+        from lib import db
+        self.tmp = Path(tempfile.mkdtemp())
+        self.root = self.tmp / 'root'
+        self.db_path = self.tmp / 'app.db'
+        u = self.root / 'users' / '홍길동'
+        (u / 'experiences').mkdir(parents=True)
+        (u / 'experiences' / '2024-테스트경험.md').write_text(
+            '# 테스트 경험\n\n## 메타\n\n- 카테고리: 리더십\n\n### Result (결과)\n\n성과를 냈다.',
+            encoding='utf-8')
+        (self.root / 'outputs' / '홍길동').mkdir(parents=True)
+        db.init_db(self.db_path)
+        self.db = db
+        conn = db.get_conn(self.db_path)
+        conn.execute(
+            "INSERT INTO jobs (source, source_job_id, company, position, required_json, preferred_json) "
+            "VALUES ('manual','0001','테스트기업','백엔드','[\"조건1\"]','[]')"
+        )
+        self.job_id = conn.execute('SELECT last_insert_rowid() AS id').fetchone()['id']
+        conn.commit()
+        conn.close()
+        app = create_app({'PROJECT_ROOT': self.root, 'DB_PATH': self.db_path, 'TESTING': True})
+        self.c = app.test_client()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def insert_match(self):
+        conn = self.db.get_conn(self.db_path)
+        conn.execute(
+            'INSERT INTO matches (user, job_id, score, required_hit, preferred_hit, evidence_json, missing_json) '
+            "VALUES ('홍길동', ?, 100, 1.0, 0, ?, '[]')",
+            (self.job_id, '[{"condition": "조건1", "kind": "필수", "verdict": "충족", '
+                           '"evidence_file": "2024-테스트경험.md", "note": ""}]'),
+        )
+        conn.commit()
+        conn.close()
+
+    def post(self, **overrides):
+        payload = {'job_id': str(self.job_id), 'question': '지원 동기', 'char_limit': '50'}
+        payload.update(overrides)
+        return self.c.post('/generate/홍길동/bundle', json=payload)
+
+    def test_missing_job_id_rejected(self):
+        r = self.c.post('/generate/홍길동/bundle', json={'question': 'x', 'char_limit': '50'})
+        self.assertEqual(r.status_code, 400)
+
+    def test_unknown_job_id_errors_via_sse(self):
+        with patch.object(generate_route.matcher, 'match_job') as mm:
+            r = self.post(job_id='9999')
+            body = r.get_data(as_text=True)
+        mm.assert_not_called()
+        self.assertIn('공고를 찾을 수 없습니다', body)
+
+    def test_runs_matching_when_no_prior_match(self):
+        # portfolio 도 이 호출 안에서 돌아간다 — lib.portfolio 는 stream_complete 를 자기
+        # 이름공간으로 따로 import 했으므로 generate_route 쪽 patch 만으론 안 막힌다(실제로
+        # 처음엔 이걸 빠뜨려서 이 테스트가 real API 를 부를 뻔했다).
+        fake_answer = llm_result('===ANSWER===\n답변입니다\n===END===\n===META===\n참조한 경험: x\n===END===\n')
+        fake_portfolio = llm_result('===TOC===\n1. 도입\n===END===\n\n===CHAPTER: 1===\n요약\n===END===\n')
+        with patch.object(generate_route.matcher, 'match_job') as mm, \
+             patch.object(portfolio_module, 'stream_complete', return_value=fake_portfolio), \
+             patch.object(generate_route, 'stream_complete', return_value=fake_answer):
+            mm.return_value = generate_route.matcher.MatchResult(
+                ok=True, job_id=self.job_id, user='홍길동', company='테스트기업', position='백엔드',
+                score=90.0, required_hit=1.0, preferred_hit=0.0, category='적합')
+            r = self.post()
+            body = r.get_data(as_text=True)
+        mm.assert_called_once()
+        self.assertIn('"doc": "match"', body)
+
+    def test_skips_matching_when_match_already_exists(self):
+        self.insert_match()
+        fake_answer = llm_result('===ANSWER===\n답변입니다\n===END===\n===META===\n참조한 경험: x\n===END===\n')
+        fake_portfolio = llm_result('===TOC===\n1. 도입\n===END===\n\n===CHAPTER: 1===\n요약\n===END===\n')
+        with patch.object(generate_route.matcher, 'match_job') as mm, \
+             patch.object(portfolio_module, 'stream_complete', return_value=fake_portfolio), \
+             patch.object(generate_route, 'stream_complete', return_value=fake_answer):
+            r = self.post()
+            body = r.get_data(as_text=True)
+        mm.assert_not_called()
+        self.assertNotIn('"doc": "match"', body)
+
+    def test_all_three_documents_saved_to_same_folder(self):
+        # 주의: 자소서(generate_route)와 포트폴리오(lib.portfolio)는 각자 lib.llm.stream_complete 를
+        # 자기 모듈 이름공간으로 따로 import 했다 — generate_route 쪽만 patch 하면 포트폴리오 호출은
+        # 실제 API 로 새어나간다(이 테스트를 처음 짤 때 실제로 걸릴 뻔한 함정). 둘 다 따로 patch 한다.
+        self.insert_match()
+        fake_answer = llm_result('===ANSWER===\n답변입니다\n===END===\n===META===\n참조한 경험: x\n===END===\n')
+        fake_portfolio = llm_result(
+            '===TOC===\n1. 도입\n===END===\n\n===CHAPTER: 1===\n요약\n===END===\n'
+        )
+        with patch.object(portfolio_module, 'stream_complete', return_value=fake_portfolio), \
+             patch.object(generate_route, 'stream_complete', return_value=fake_answer):
+            r = self.post()
+            body = r.get_data(as_text=True)
+
+        self.assertIn('"doc": "resume"', body)
+        self.assertIn('"doc": "portfolio"', body)
+        self.assertIn('"doc": "coverletter"', body)
+        self.assertIn('event: done', body)
+
+        folder = self.root / 'outputs' / '홍길동' / '테스트기업_백엔드'
+        self.assertTrue((folder / '이력서.md').exists())
+        self.assertTrue((folder / 'portfolio-outline.md').exists())
+        self.assertTrue((folder / '자소서.md').exists())
+
+    def test_unsafe_company_name_sanitized_for_folder(self):
+        conn = self.db.get_conn(self.db_path)
+        conn.execute(
+            "INSERT INTO jobs (source, source_job_id, company, position, required_json, preferred_json) "
+            "VALUES ('manual','0002','../../evil','백엔드','[]','[]')"
+        )
+        job_id = conn.execute('SELECT last_insert_rowid() AS id').fetchone()['id']
+        conn.execute(
+            'INSERT INTO matches (user, job_id, score, required_hit, preferred_hit, evidence_json, missing_json) '
+            "VALUES ('홍길동', ?, 0, 0, 0, '[]', '[]')", (job_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        fake_answer = llm_result('===ANSWER===\n답변\n===END===\n===META===\nx\n===END===\n')
+        fake_portfolio = llm_result('===TOC===\n1. 도입\n===END===\n\n===CHAPTER: 1===\n요약\n===END===\n')
+        with patch.object(portfolio_module, 'stream_complete', return_value=fake_portfolio), \
+             patch.object(generate_route, 'stream_complete', return_value=fake_answer):
+            r = self.post(job_id=str(job_id))
+            r.get_data()
+        self.assertFalse((self.tmp / 'evil_백엔드').exists())
+        self.assertFalse((self.root / 'outputs' / '..' / 'evil_백엔드').resolve().exists())
+
+    def test_does_not_touch_real_project_db(self):
+        """DB_PATH 격리 회귀 방지: 이 테스트 자체가 실제 data/app.db 를 안 건드리는지 보장한다."""
+        self.insert_match()
+        fake_portfolio = llm_result('===TOC===\n1. 도입\n===END===\n\n===CHAPTER: 1===\n요약\n===END===\n')
+        with patch.object(portfolio_module, 'stream_complete', return_value=fake_portfolio), \
+             patch.object(generate_route, 'stream_complete',
+                           return_value=llm_result('===ANSWER===\nx\n===END===\n===META===\nx\n===END===\n')):
+            self.post().get_data()
+        real_conn = self.db.get_conn()  # db_path 생략 → 실제 프로젝트 DB
+        try:
+            count = real_conn.execute("SELECT COUNT(*) AS n FROM jobs WHERE company = '테스트기업'").fetchone()['n']
+        finally:
+            real_conn.close()
+        self.assertEqual(count, 0)
 
 
 if __name__ == '__main__':

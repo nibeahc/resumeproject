@@ -71,6 +71,23 @@
 {% endif %}
 
 <form id="genForm" onsubmit="return false;">
+  <!-- S7-3: 공고에서 불러오기. 고르면 기업명/직무명이 공고 값으로 고정되고, "서류 3종 생성"이 나타난다. -->
+  <div class="card">
+    <h2 style="margin-bottom:4px;">공고에서 불러오기 (선택)</h2>
+    <p style="font-size:12px; color:#6e6e73; margin-bottom:10px;">
+      공고를 고르면 이력서·자소서·포트폴리오 초안을 한 번에 만들 수 있습니다.
+      <a href="/jobs">공고 등록/확인 →</a>
+    </p>
+    <select class="form-input" id="jobSelect" onchange="onJobSelect()">
+      <option value="">직접 입력 (공고 연동 안 함)</option>
+      {% for j in jobs %}
+      <option value="{{ j.id }}" data-company="{{ j.company }}" data-position="{{ j.position }}">
+        {{ j.company }} · {{ j.position }}
+      </option>
+      {% endfor %}
+    </select>
+  </div>
+
   <div class="card">
     <h2 style="margin-bottom:16px;">문항 정보</h2>
     <div class="form-grid" style="margin-bottom:12px;">
@@ -100,12 +117,33 @@
     </div>
   </div>
 
-  <div style="display:flex; justify-content:flex-end; margin-top:4px; margin-bottom:20px;">
+  <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:4px; margin-bottom:20px;">
+    <button type="button" class="btn btn-primary" id="bundleBtn" onclick="generateBundle()"
+            style="display:none;" {% if exp_count == 0 %}disabled{% endif %}>
+      서류 3종 생성 (이력서·자소서·포트폴리오) →
+    </button>
     <button type="button" class="btn btn-primary" id="genBtn" onclick="generate()" {% if exp_count == 0 %}disabled{% endif %}>
-      생성 →
+      자소서만 생성 →
     </button>
   </div>
 </form>
+
+<!-- S7-3: 서류 3종 생성 진행 상황 -->
+<div id="bundleBox" style="display:none;">
+  <div class="card" style="background:#f5f5f7; border:none;">
+    <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">
+      <span class="spinner" id="bundleSpinner"></span>
+      <span style="font-size:13px; font-weight:500;" id="bundleTitle">준비 중...</span>
+    </div>
+    <div id="bundleLog" style="font-size:12px; color:#6e6e73; line-height:1.9;"></div>
+  </div>
+</div>
+<div id="bundleResultBox" style="display:none;">
+  <div class="card">
+    <h2 style="margin-bottom:12px;">생성 결과</h2>
+    <div id="bundleResultList" style="font-size:13px; line-height:2;"></div>
+  </div>
+</div>
 
 <div id="progressBox">
   <div class="card">
@@ -199,6 +237,116 @@ function logLine(text) {
   div.textContent = text;
   log.appendChild(div);
   log.scrollTop = log.scrollHeight;
+}
+
+// S7-3: 공고 선택 시 기업명/직무명을 공고 값으로 고정하고 "서류 3종 생성" 버튼을 보여준다.
+function onJobSelect() {
+  const sel = document.getElementById('jobSelect');
+  const opt = sel.options[sel.selectedIndex];
+  const companyInput = document.getElementById('company');
+  const positionInput = document.getElementById('position');
+  const bundleBtn = document.getElementById('bundleBtn');
+
+  if (!sel.value) {
+    companyInput.readOnly = false;
+    positionInput.readOnly = false;
+    bundleBtn.style.display = 'none';
+    return;
+  }
+  companyInput.value = opt.dataset.company;
+  positionInput.value = opt.dataset.position;
+  companyInput.readOnly = true;
+  positionInput.readOnly = true;
+  bundleBtn.style.display = '';
+}
+
+function bundleLogLine(text) {
+  const log = document.getElementById('bundleLog');
+  const div = document.createElement('div');
+  div.textContent = text;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+const BUNDLE_DOC_LABEL = { match: '매칭', resume: '이력서', portfolio: '포트폴리오', coverletter: '자소서' };
+
+async function generateBundle() {
+  const jobId = document.getElementById('jobSelect').value;
+  const question = document.getElementById('question').value.trim();
+  const charLimit = document.getElementById('charLimit').value;
+  const countMode = document.querySelector('input[name="countMode"]:checked').value;
+  if (!jobId || !question || !charLimit) {
+    toast('문항과 글자수를 입력해주세요.');
+    return;
+  }
+
+  const bundleBtn = document.getElementById('bundleBtn');
+  const genBtn = document.getElementById('genBtn');
+  bundleBtn.disabled = true;
+  genBtn.disabled = true;
+  document.getElementById('bundleBox').style.display = '';
+  document.getElementById('bundleResultBox').style.display = 'none';
+  document.getElementById('bundleLog').innerHTML = '';
+  document.getElementById('bundleSpinner').style.display = '';
+  document.getElementById('bundleTitle').textContent = '생성 중...';
+
+  try {
+    const res = await fetch('/generate/{{ user }}/bundle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ job_id: jobId, question, char_limit: charLimit, count_mode: countMode }),
+    });
+
+    let doneData = null, errorMsg = null;
+    await consumeSSE(res, (ev, data) => {
+      if (ev === 'progress') {
+        const label = BUNDLE_DOC_LABEL[data.doc] || data.doc;
+        if (data.stage === 'start') bundleLogLine(`${label} 생성 중...`);
+        else if (data.stage === 'done' && data.ok === false) bundleLogLine(`⚠️ ${label} 실패: ${data.error}`);
+        else if (data.stage === 'done') bundleLogLine(`✅ ${label} 완료${data.path ? ' — ' + data.path : ''}`);
+        else if (data.stage === 'selected') bundleLogLine(`${label}: 경험 선택 완료`);
+        // 자소서 하위 이벤트(선택/재시도/생성중 등)는 doc: 'coverletter' 로 태그되어 오지만
+        // 로그가 너무 길어지지 않게 stage 가 start/done 일 때만 위에서 이미 보여줬다.
+      } else if (ev === 'done') {
+        doneData = data;
+      } else if (ev === 'error') {
+        errorMsg = data.message;
+      }
+    });
+
+    bundleBtn.disabled = false;
+    genBtn.disabled = false;
+    document.getElementById('bundleSpinner').style.display = 'none';
+
+    if (errorMsg) {
+      document.getElementById('bundleTitle').textContent = '실패';
+      bundleLogLine('⚠️ ' + errorMsg);
+      return;
+    }
+    if (!doneData) {
+      document.getElementById('bundleTitle').textContent = '연결이 끊겼습니다.';
+      return;
+    }
+
+    document.getElementById('bundleTitle').textContent = '완료';
+    const list = document.getElementById('bundleResultList');
+    const rows = [
+      ['이력서', doneData.resume_ok, doneData.resume_path],
+      ['자소서', doneData.coverletter_ok, doneData.coverletter_path],
+      ['포트폴리오', doneData.portfolio_ok, doneData.portfolio_path],
+    ];
+    list.innerHTML = rows.map(([label, ok, path]) => {
+      if (!ok) return `<div>⚠️ ${label}: 실패${doneData.coverletter_error && label === '자소서' ? ' — ' + escapeHtml(doneData.coverletter_error) : ''}</div>`;
+      const url = `/output/{{ user }}/${encodeURIComponent(path)}`;
+      return `<div>✅ ${label}: <a href="${url}">${escapeHtml(path)}</a></div>`;
+    }).join('');
+    document.getElementById('bundleResultBox').style.display = '';
+  } catch (e) {
+    bundleBtn.disabled = false;
+    genBtn.disabled = false;
+    document.getElementById('bundleTitle').textContent = '오류';
+    bundleLogLine('⚠️ 요청 중 오류: ' + e.message);
+  }
 }
 
 async function generate(overrideFiles) {

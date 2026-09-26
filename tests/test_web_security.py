@@ -21,13 +21,14 @@ EXPECTED_ROUTES = {
     ('/profile/<name>/setup', 'GET'),
     ('/profile/<name>/setup', 'POST'),
     ('/upload/<name>', 'POST'),
-    ('/output/<name>/<filename>', 'GET'),
-    ('/output/<name>/<filename>/save', 'POST'),
+    ('/output/<name>/<path:filename>', 'GET'),
+    ('/output/<name>/<path:filename>/save', 'POST'),
     ('/experience/<name>/<filename>', 'GET'),
     ('/experience/<name>/<filename>/save', 'POST'),
     ('/parse/<name>', 'POST'),
     ('/generate/<name>', 'POST'),
     ('/generate/<name>', 'GET'),
+    ('/generate/<name>/bundle', 'POST'),
     ('/raw-fallback/<name>', 'POST'),
     ('/elicit/<name>', 'GET'),
     ('/elicit/<name>', 'POST'),
@@ -49,6 +50,8 @@ class WebTestBase(unittest.TestCase):
         (self.root / 'outputs' / '홍길동').mkdir(parents=True)
         (self.root / 'users' / '홍길동' / 'experiences' / 'a.md').write_text('# 경험A\n- 시기: 2024\n', encoding='utf-8')
         (self.root / 'outputs' / '홍길동' / 'x.md').write_text('본문', encoding='utf-8')
+        (self.root / 'outputs' / '홍길동' / '테스트기업_직무').mkdir(parents=True)  # S7 서브폴더 구조
+        (self.root / 'outputs' / '홍길동' / '테스트기업_직무' / '자소서.md').write_text('서브폴더 본문', encoding='utf-8')
         (self.tmp / 'secret.md').write_text('SECRET', encoding='utf-8')   # root 밖 파일
         app = create_app({'PROJECT_ROOT': self.root, 'TESTING': True})
         self.app, self.c = app, app.test_client()
@@ -71,6 +74,27 @@ class RouteStructureTest(WebTestBase):
         self.assertEqual(self.c.get('/profile/홍길동/setup').status_code, 200)
         self.assertEqual(self.c.get('/experience/홍길동/a.md').status_code, 200)
         self.assertEqual(self.c.get('/output/홍길동/x.md').status_code, 200)
+
+    def test_output_subfolder_path_served(self):
+        """S7 부터 outputs/[이름]/[기업]_[직무]/*.md 서브폴더가 생겼다 — /output 라우트가
+        <path:filename> 으로 슬래시 있는 경로도 서빙해야 한다."""
+        r = self.c.get('/output/홍길동/테스트기업_직무/자소서.md')
+        self.assertEqual(r.status_code, 200)
+        self.assertIn('서브폴더 본문'.encode('utf-8'), r.data)
+
+    def test_output_subfolder_save_roundtrip(self):
+        r = self.c.post('/output/홍길동/테스트기업_직무/자소서.md/save', json={'content': '수정됨'})
+        self.assertEqual(r.get_json(), {'success': True})
+        self.assertEqual(
+            (self.root / 'outputs' / '홍길동' / '테스트기업_직무' / '자소서.md').read_text(encoding='utf-8'),
+            '수정됨')
+
+    def test_output_subfolder_traversal_rejected(self):
+        for path in ['/output/홍길동/테스트기업_직무/../../secret.md',
+                     '/output/홍길동/../secret.md',
+                     '/output/홍길동/테스트기업_직무/..']:
+            self.assertEqual(self.c.get(path).status_code, 400, path)
+        self.assertEqual((self.tmp / 'secret.md').read_text(encoding='utf-8'), 'SECRET')
 
     def test_missing_user_redirects_to_index(self):
         r = self.c.get('/profile/없는사람/setup')

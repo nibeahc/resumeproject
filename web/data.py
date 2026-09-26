@@ -1,6 +1,7 @@
 """화면에 보여줄 데이터를 파일에서 읽는 헬퍼."""
 import re
 
+from lib import db
 from web.paths import output_dir, project_root, user_dir
 
 
@@ -24,11 +25,32 @@ def get_experiences(user):
 
 
 def get_outputs(user):
+    """outputs/[이름]/ 아래 결과물을 나열한다.
+
+    S1~S1-4 시절엔 outputs/[이름]/[기업]_[직무].md 처럼 평평하게 저장했다. S7(이력서/
+    포트폴리오/자소서)부터는 outputs/[이름]/[기업]_[직무]/*.md 서브폴더에 모아 쌓는다
+    (한 지원 건의 문서 3종이 한 폴더에 있어야 S7-3 일괄 생성이 자연스럽다). 두 형태가
+    실제로 공존할 수 있으므로(과거에 만든 파일이 남아있다) 둘 다 찾는다.
+    """
     d = output_dir(user)
     if not d.exists():
         return []
-    files = sorted(d.glob('*.md'), key=lambda f: f.stat().st_mtime, reverse=True)
-    return [{'filename': f.name} for f in files]
+    files = list(d.glob('*.md')) + list(d.glob('*/*.md'))
+    files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+    return [{'filename': f.relative_to(d).as_posix()} for f in files]
+
+
+def get_open_jobs(db_path=None):
+    """generate.html 의 "공고에서 불러오기" 드롭다운용 (S7-3). 마감 안 된 공고만, 최신순.
+    jobs 는 사용자별이 아니라 전역이라 project_root/user_dir 을 거치지 않고 DB 를 직접 본다."""
+    conn = db.get_conn(db_path)
+    try:
+        rows = conn.execute(
+            'SELECT id, company, position FROM jobs WHERE closed = 0 ORDER BY fetched_at DESC'
+        ).fetchall()
+        return [{'id': r['id'], 'company': r['company'], 'position': r['position']} for r in rows]
+    finally:
+        conn.close()
 
 
 def get_raw_files(user):
