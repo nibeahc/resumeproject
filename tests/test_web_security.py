@@ -25,6 +25,7 @@ EXPECTED_ROUTES = {
     ('/output/<name>/<path:filename>/save', 'POST'),
     ('/output/<name>/<path:filename>/versions', 'GET'),
     ('/output/<name>/<path:filename>/diff', 'GET'),
+    ('/output/<name>/<path:filename>/docx', 'GET'),
     ('/experience/<name>/<filename>', 'GET'),
     ('/experience/<name>/<filename>/save', 'POST'),
     ('/parse/<name>', 'POST'),
@@ -305,6 +306,30 @@ class VersioningRouteTest(WebTestBase):
             self.c.get('/output/홍길동/../secret.md/diff?a=1&b=2').status_code, 400)
         self.assertEqual(
             self.c.get('/output/홍길동/테스트기업_직무/자소서.md/diff?a=x&b=2').status_code, 400)
+
+    def test_docx_download_returns_valid_word_file(self):
+        """S8-2: /docx 가 실제로 열리는 .docx 를 돌려주는지 (한글 폰트 깨짐은 사람이 열어봐야
+        아는 항목이지만, 최소한 파일 자체가 유효하고 내용이 들어있는지는 코드로 검증한다)."""
+        import io
+        from docx import Document
+        r = self.c.get('/output/홍길동/테스트기업_직무/자소서.md/docx')
+        self.assertEqual(r.status_code, 200)
+        self.assertIn('wordprocessingml', r.headers['Content-Type'])
+        doc = Document(io.BytesIO(r.data))
+        self.assertIn('서브폴더 본문', [p.text for p in doc.paragraphs])
+
+    def test_docx_download_missing_file_404(self):
+        r = self.c.get('/output/홍길동/없는파일.md/docx')
+        self.assertEqual(r.status_code, 404)
+
+    def test_docx_download_rejects_traversal(self):
+        self.assertEqual(self.c.get('/output/홍길동/../secret.md/docx').status_code, 400)
+
+    def test_editor_shows_docx_link_for_output_only(self):
+        r_output = self.c.get('/output/홍길동/x.md')
+        self.assertIn(b'DOCX', r_output.data)
+        r_experience = self.c.get('/experience/홍길동/a.md')
+        self.assertNotIn(b'DOCX', r_experience.data)
 
     def test_editor_shows_version_history_for_output_only(self):
         r_output = self.c.get('/output/홍길동/x.md')

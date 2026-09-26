@@ -1,10 +1,11 @@
 """파일 업로드, 자소서(outputs) 및 경험(experiences) 파일 보기와 저장."""
 import difflib
+from io import BytesIO
 from pathlib import Path
 
-from flask import Blueprint, abort, current_app, jsonify, render_template, request
+from flask import Blueprint, abort, current_app, jsonify, render_template, request, send_file
 
-from lib import db, versions
+from lib import db, export, versions
 from web.paths import (ALLOWED_EXT, output_dir, project_root, safe_path, safe_upload_name,
                        user_dir, valid_segment)
 
@@ -123,6 +124,21 @@ def diff_output_versions(name, filename):
     lines_b = path_b.read_text(encoding='utf-8').splitlines()
     diff = list(difflib.unified_diff(lines_a, lines_b, fromfile=f'v{a}', tofile=f'v{b}', lineterm=''))
     return jsonify(success=True, a=a, b=b, diff=diff)
+
+
+@bp.route('/output/<name>/<path:filename>/docx')
+def download_output_docx(name, filename):
+    """ROADMAP S8-2. PDF 는 이번 단계에서 보류(사용자 결정, 2026-09-26) — lib/export.py 참고."""
+    p = safe_path(project_root() / 'outputs', name, *filename.split('/'))
+    if not p.exists():
+        return '파일을 찾을 수 없습니다.', 404
+    doc = export.markdown_to_docx(p.read_text(encoding='utf-8'))
+    buf = BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    download_name = f'{Path(filename).stem}.docx'
+    return send_file(buf, as_attachment=True, download_name=download_name,
+                     mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
 
 
 @bp.route('/experience/<name>/<filename>')

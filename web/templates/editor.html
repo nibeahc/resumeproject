@@ -17,6 +17,9 @@
     <div style="display:flex; gap:8px;">
       <button class="btn btn-secondary btn-sm" id="btnPreview" onclick="setMode('preview')">미리보기</button>
       <button class="btn btn-secondary btn-sm" id="btnEdit" onclick="setMode('edit')">편집</button>
+      {% if kind == 'output' %}
+      <a class="btn btn-secondary btn-sm" href="/output/{{ user }}/{{ filename }}/docx">DOCX로 받기</a>
+      {% endif %}
     </div>
     <button class="btn btn-primary btn-sm" onclick="save()">저장</button>
   </div>
