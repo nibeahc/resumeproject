@@ -1,12 +1,22 @@
 """파일 업로드, 자소서(outputs) 및 경험(experiences) 파일 보기와 저장."""
+import difflib
 from pathlib import Path
 
-from flask import Blueprint, abort, jsonify, render_template, request
+from flask import Blueprint, abort, current_app, jsonify, render_template, request
 
-from web.paths import (ALLOWED_EXT, project_root, safe_path, safe_upload_name,
+from lib import db, versions
+from web.paths import (ALLOWED_EXT, output_dir, project_root, safe_path, safe_upload_name,
                        user_dir, valid_segment)
 
 bp = Blueprint('documents', __name__)
+
+
+def _db_path():
+    """S8-1(버전 보존)부터 documents 테이블을 쓴다. jobs.py/matches.py 와 같은 이유로
+    DB_PATH 설정을 존중한다 — 안 그러면 테스트가 실제 프로젝트 DB 를 건드리게 된다."""
+    path = current_app.config.get('DB_PATH')
+    db.init_db(path)
+    return path
 
 
 @bp.route('/upload/<name>', methods=['POST'])
@@ -77,9 +87,42 @@ def view_output(name, filename):
 
 @bp.route('/output/<name>/<path:filename>/save', methods=['POST'])
 def save_output(name, filename):
-    p = safe_path(project_root() / 'outputs', name, *filename.split('/'))
-    p.write_text(request.json.get('content', ''), encoding='utf-8')
-    return jsonify(success=True)
+    """ROADMAP S8-1: 덮어쓰지 않고 버전을 남긴다. 경로 안전성 검사는 그대로 하되(safe_path
+    가 위험한 세그먼트면 여기서 400을 낸다), 실제 파일 쓰기는 lib/versions.py 에 맡긴다 —
+    직접 write_text() 하면 버전 기록 없이 덮어써진다."""
+    safe_path(project_root() / 'outputs', name, *filename.split('/'))
+    content = request.json.get('content', '')
+    result = versions.save_version(output_dir(name), filename, content, name, db_path=_db_path())
+    return jsonify(success=True, version=result.version)
+
+
+@bp.route('/output/<name>/<path:filename>/versions')
+def list_output_versions(name, filename):
+    safe_path(project_root() / 'outputs', name, *filename.split('/'))
+    history = versions.list_versions(output_dir(name), filename, name, db_path=_db_path())
+    return jsonify(versions=[
+        {'version': v.version, 'path': v.path, 'char_count': v.char_count, 'created_at': v.created_at}
+        for v in history
+    ])
+
+
+@bp.route('/output/<name>/<path:filename>/diff')
+def diff_output_versions(name, filename):
+    """두 버전을 줄 단위로 비교한다 (ROADMAP S8-1의 "비교 가능"). ?a=1&b=3 처럼 버전 번호를 받는다."""
+    safe_path(project_root() / 'outputs', name, *filename.split('/'))
+    try:
+        a, b = int(request.args.get('a', '')), int(request.args.get('b', ''))
+    except ValueError:
+        abort(400)
+    vdir = versions.version_dir(output_dir(name) / filename)
+    path_a, path_b = safe_path(vdir, f'v{a}.md'), safe_path(vdir, f'v{b}.md')
+    if not (path_a.exists() and path_b.exists()):
+        return jsonify(success=False, error='해당 버전을 찾을 수 없습니다.'), 404
+
+    lines_a = path_a.read_text(encoding='utf-8').splitlines()
+    lines_b = path_b.read_text(encoding='utf-8').splitlines()
+    diff = list(difflib.unified_diff(lines_a, lines_b, fromfile=f'v{a}', tofile=f'v{b}', lineterm=''))
+    return jsonify(success=True, a=a, b=b, diff=diff)
 
 
 @bp.route('/experience/<name>/<filename>')

@@ -23,6 +23,8 @@ EXPECTED_ROUTES = {
     ('/upload/<name>', 'POST'),
     ('/output/<name>/<path:filename>', 'GET'),
     ('/output/<name>/<path:filename>/save', 'POST'),
+    ('/output/<name>/<path:filename>/versions', 'GET'),
+    ('/output/<name>/<path:filename>/diff', 'GET'),
     ('/experience/<name>/<filename>', 'GET'),
     ('/experience/<name>/<filename>/save', 'POST'),
     ('/parse/<name>', 'POST'),
@@ -53,7 +55,9 @@ class WebTestBase(unittest.TestCase):
         (self.root / 'outputs' / '홍길동' / '테스트기업_직무').mkdir(parents=True)  # S7 서브폴더 구조
         (self.root / 'outputs' / '홍길동' / '테스트기업_직무' / '자소서.md').write_text('서브폴더 본문', encoding='utf-8')
         (self.tmp / 'secret.md').write_text('SECRET', encoding='utf-8')   # root 밖 파일
-        app = create_app({'PROJECT_ROOT': self.root, 'TESTING': True})
+        # S8-1 부터 /output 저장이 documents 테이블(버전 기록)을 쓴다 — DB_PATH 를 임시 경로로
+        # 안 주면 이 클래스를 상속하는 모든 테스트가 실제 프로젝트 data/app.db 를 건드리게 된다.
+        app = create_app({'PROJECT_ROOT': self.root, 'DB_PATH': self.tmp / 'app.db', 'TESTING': True})
         self.app, self.c = app, app.test_client()
 
     def tearDown(self):
@@ -83,8 +87,11 @@ class RouteStructureTest(WebTestBase):
         self.assertIn('서브폴더 본문'.encode('utf-8'), r.data)
 
     def test_output_subfolder_save_roundtrip(self):
+        # S8-1: 저장은 버전을 남긴다(version 필드) — 이 fixture 파일은 setUp 에서 이미 한 번
+        # 만들어졌으니 이 저장이 v1(그 기존 내용의 스냅샷은 아직 없다는 점에 주의: 버전은
+        # save_version() 을 거친 저장부터 세므로 최초 저장이 v1이 된다).
         r = self.c.post('/output/홍길동/테스트기업_직무/자소서.md/save', json={'content': '수정됨'})
-        self.assertEqual(r.get_json(), {'success': True})
+        self.assertEqual(r.get_json(), {'success': True, 'version': 1})
         self.assertEqual(
             (self.root / 'outputs' / '홍길동' / '테스트기업_직무' / '자소서.md').read_text(encoding='utf-8'),
             '수정됨')
@@ -245,6 +252,75 @@ class RawFallbackTest(WebTestBase):
         sibling = self.original.parent / '스캔본.붙여넣기.md'
         self.assertIn('두 번째로 고친', sibling.read_text(encoding='utf-8'))
         self.assertNotIn('첫 번째', sibling.read_text(encoding='utf-8'))
+
+
+class VersioningRouteTest(WebTestBase):
+    """S8-1: /output 저장이 덮어쓰지 않고 버전을 남기는지, 조회/비교가 되는지."""
+
+    def save(self, content, doc='테스트기업_직무/자소서.md'):
+        return self.c.post(f'/output/홍길동/{doc}/save', json={'content': content})
+
+    def test_three_saves_produce_v1_v2_v3_all_viewable(self):
+        """ROADMAP S8-1 완료 조건 그대로: 저장 3회 후 v1, v2, v3 모두 조회 가능."""
+        r1 = self.save('첫 번째 버전')
+        r2 = self.save('두 번째 버전')
+        r3 = self.save('세 번째 버전')
+        self.assertEqual([r1.get_json()['version'], r2.get_json()['version'], r3.get_json()['version']], [1, 2, 3])
+
+        for n, expected in [(1, '첫 번째 버전'), (2, '두 번째 버전'), (3, '세 번째 버전')]:
+            r = self.c.get(f'/output/홍길동/테스트기업_직무/자소서/v{n}.md')
+            self.assertEqual(r.status_code, 200, f'v{n} 조회 실패')
+            self.assertIn(expected.encode('utf-8'), r.data)
+
+    def test_versions_endpoint_lists_history(self):
+        self.save('v1')
+        self.save('v2')
+        r = self.c.get('/output/홍길동/테스트기업_직무/자소서.md/versions')
+        data = r.get_json()
+        self.assertEqual([v['version'] for v in data['versions']], [1, 2])
+        self.assertEqual(data['versions'][0]['char_count'], 2)
+
+    def test_diff_shows_line_changes_between_versions(self):
+        self.save('첫 줄\n둘째 줄')
+        self.save('첫 줄\n바뀐 둘째 줄')
+        r = self.c.get('/output/홍길동/테스트기업_직무/자소서.md/diff?a=1&b=2')
+        data = r.get_json()
+        self.assertTrue(data['success'])
+        joined = '\n'.join(data['diff'])
+        self.assertIn('-둘째 줄', joined)
+        self.assertIn('+바뀐 둘째 줄', joined)
+
+    def test_diff_missing_version_404(self):
+        self.save('v1')
+        r = self.c.get('/output/홍길동/테스트기업_직무/자소서.md/diff?a=1&b=9')
+        self.assertEqual(r.status_code, 404)
+
+    def test_versions_route_rejects_traversal(self):
+        for path in ['/output/홍길동/../secret.md/versions',
+                     '/output/홍길동/테스트기업_직무/../../secret.md/versions']:
+            self.assertEqual(self.c.get(path).status_code, 400, path)
+
+    def test_diff_route_rejects_traversal_and_bad_version(self):
+        self.assertEqual(
+            self.c.get('/output/홍길동/../secret.md/diff?a=1&b=2').status_code, 400)
+        self.assertEqual(
+            self.c.get('/output/홍길동/테스트기업_직무/자소서.md/diff?a=x&b=2').status_code, 400)
+
+    def test_editor_shows_version_history_for_output_only(self):
+        r_output = self.c.get('/output/홍길동/x.md')
+        self.assertIn(b'versionCard', r_output.data)
+        r_experience = self.c.get('/experience/홍길동/a.md')
+        self.assertNotIn(b'versionCard', r_experience.data)
+
+    def test_resave_does_not_touch_other_documents_history(self):
+        self.save('이력서 버전', doc='테스트기업_직무/이력서.md')
+        self.save('자소서 버전1', doc='테스트기업_직무/자소서.md')
+        self.save('자소서 버전2', doc='테스트기업_직무/자소서.md')
+
+        resume_versions = self.c.get('/output/홍길동/테스트기업_직무/이력서.md/versions').get_json()['versions']
+        cover_versions = self.c.get('/output/홍길동/테스트기업_직무/자소서.md/versions').get_json()['versions']
+        self.assertEqual(len(resume_versions), 1)
+        self.assertEqual(len(cover_versions), 2)
 
 
 if __name__ == '__main__':

@@ -33,6 +33,22 @@
 <p style="font-size:12px; color:#6e6e73; margin-top:8px;">
   경로: {{ 'outputs' if kind=='output' else 'users/'+user+'/experiences' }}/{{ filename }}
 </p>
+
+{% if kind == 'output' %}
+<!-- S8-1: 저장할 때마다 버전이 쌓인다. 여기서 이전 버전을 열어보거나 두 버전을 비교한다. -->
+<div class="card" id="versionCard" style="margin-top:8px;">
+  <h2 style="margin-bottom:10px; font-size:14px;">버전 히스토리</h2>
+  <div id="versionList" style="font-size:13px; color:#6e6e73;">불러오는 중...</div>
+  <div id="diffControls" style="display:none; margin-top:10px; gap:8px; align-items:center;">
+    <select class="form-input" id="diffA" style="width:auto;"></select>
+    <span style="font-size:12px; color:#6e6e73;">→</span>
+    <select class="form-input" id="diffB" style="width:auto;"></select>
+    <button class="btn btn-secondary btn-sm" onclick="showDiff()">비교</button>
+  </div>
+  <pre id="diffText" style="display:none; margin-top:12px; background:#f5f5f7; border-radius:8px;
+       padding:12px; font-size:12px; line-height:1.6; overflow-x:auto; white-space:pre-wrap;"></pre>
+</div>
+{% endif %}
 {% endblock %}
 
 {% block scripts %}
@@ -58,7 +74,8 @@ async function save() {
 
   if (res.success) {
     document.getElementById('preview').textContent = content;
-    toast('저장 완료');
+    toast(res.version ? `저장 완료 (v${res.version})` : '저장 완료');
+    if (document.getElementById('versionList')) loadVersions();
   } else {
     toast('저장 실패');
   }
@@ -66,5 +83,42 @@ async function save() {
 
 // 초기 상태: 미리보기
 setMode('preview');
+
+// S8-1: 버전 히스토리 (kind === 'output' 일 때만 이 요소가 존재한다)
+async function loadVersions() {
+  const list = document.getElementById('versionList');
+  if (!list) return;
+  try {
+    const data = await fetch('/output/{{ user }}/{{ filename }}/versions').then(r => r.json());
+    const versions = data.versions || [];
+    if (!versions.length) {
+      list.textContent = '아직 저장 이력이 없습니다 (편집 후 저장하면 버전이 쌓입니다).';
+      return;
+    }
+    list.innerHTML = versions.map(v =>
+      `<div>v${v.version} — ${v.char_count}자 — ${v.created_at} — ` +
+      `<a href="/output/{{ user }}/${encodeURIComponent(v.path)}">보기</a></div>`
+    ).join('');
+
+    const opts = versions.map(v => `<option value="${v.version}">v${v.version}</option>`).join('');
+    document.getElementById('diffA').innerHTML = opts;
+    document.getElementById('diffB').innerHTML = opts;
+    document.getElementById('diffB').value = versions[versions.length - 1].version;
+    document.getElementById('diffControls').style.display = versions.length > 1 ? 'flex' : 'none';
+  } catch (e) {
+    list.textContent = '버전 목록을 불러오지 못했습니다.';
+  }
+}
+
+async function showDiff() {
+  const a = document.getElementById('diffA').value;
+  const b = document.getElementById('diffB').value;
+  const box = document.getElementById('diffText');
+  const res = await fetch(`/output/{{ user }}/{{ filename }}/diff?a=${a}&b=${b}`).then(r => r.json());
+  box.style.display = '';
+  box.textContent = res.success ? (res.diff.length ? res.diff.join('\n') : '(두 버전이 같습니다)') : (res.error || '비교 실패');
+}
+
+loadVersions();
 </script>
 {% endblock %}
