@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+{% block title %}매칭 결과 — {{ user }}{% endblock %}
+
+{% block content %}
+<style>
+  .badge-bad { background:#fde2e1; color:#8a1c1c; }
+  .cat-fit { border-left:3px solid #0a3622; }
+  .cat-stretch { border-left:3px solid #856404; }
+  .cat-unfit { border-left:3px solid #8a1c1c; opacity:0.75; }
+  .tag { display:inline-block; background:#f0f0f5; border-radius:6px; padding:2px 8px;
+         font-size:11px; margin:1px 3px 1px 0; }
+  .tag-missing { background:#fff3cd; }
+  #runLog { font-size:12px; color:#6e6e73; line-height:1.8; margin-top:10px; }
+  .reason { font-size:12px; color:#6e6e73; }
+</style>
+
+<div style="margin-bottom:20px; font-size:13px; color:#6e6e73;">
+  <a href="/">홈</a>
+  <span style="margin:0 6px;">›</span>
+  <a href="/user/{{ user }}">{{ user }}</a>
+  <span style="margin:0 6px;">›</span>
+  매칭 결과
+</div>
+
+<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:16px;">
+  <h1 style="margin:0">매칭 결과</h1>
+  <button class="btn btn-primary" id="runBtn" onclick="runMatch()">전체 공고 매칭 실행</button>
+</div>
+
+<div id="runLog"></div>
+
+<div class="card">
+  {% if matches %}
+  <div style="overflow-x:auto;">
+    <table id="matchTable">
+      <thead>
+        <tr>
+          <th>공고</th><th>점수</th><th>분류</th><th>추천 이유</th>
+          <th>연결되는 경험</th><th>부족한 조건</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for m in matches %}
+        <tr class="{{ {'적합':'cat-fit', '도전':'cat-stretch', '부적합':'cat-unfit'}[m.category] }}">
+          <td>
+            <div>{{ m.company }} · {{ m.position }}</div>
+            <div class="reason">마감 {{ m.deadline }}</div>
+          </td>
+          <td>{{ m.score }}</td>
+          <td>
+            {% if m.category == '적합' %}<span class="badge badge-ok">적합</span>
+            {% elif m.category == '도전' %}<span class="badge badge-warn">도전</span>
+            {% else %}<span class="badge badge-bad">부적합</span>{% endif %}
+          </td>
+          <td class="reason">{{ m.reason }}</td>
+          <td>
+            {% for f in m.linked_experiences %}<span class="tag">{{ f }}</span>{% endfor %}
+            {% if not m.linked_experiences %}<span class="reason">-</span>{% endif %}
+          </td>
+          <td>
+            {% for miss in m.missing %}
+              <span class="tag tag-missing" title="{{ miss.note }}">{{ miss.condition }}</span>
+            {% endfor %}
+            {% if not m.missing %}<span class="reason">-</span>{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty">아직 매칭 결과가 없습니다. "전체 공고 매칭 실행"을 눌러 등록된 공고와 대조해보세요.</p>
+  {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function consumeSSE(response, onEvent) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf('\n\n')) !== -1) {
+      const chunk = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      if (!chunk.trim()) continue;
+      const lines = chunk.split('\n');
+      const ev = (lines[0] || '').replace('event: ', '');
+      const dataLine = lines.slice(1).join('\n');
+      let data = {};
+      try { data = JSON.parse(dataLine.replace(/^data: /, '')); } catch (e) {}
+      onEvent(ev, data);
+    }
+  }
+}
+
+function logLine(text) {
+  const log = document.getElementById('runLog');
+  const div = document.createElement('div');
+  div.textContent = text;
+  log.appendChild(div);
+}
+
+async function runMatch() {
+  const btn = document.getElementById('runBtn');
+  btn.disabled = true; btn.textContent = '매칭 중...';
+  document.getElementById('runLog').innerHTML = '';
+
+  try {
+    const res = await fetch('/matches/{{ user }}/run', { method: 'POST' });
+    let matched = 0, failed = 0;
+    await consumeSSE(res, (ev, data) => {
+      if (ev === 'progress') {
+        if (data.ok) {
+          matched++;
+          logLine(`✅ ${data.company} · ${data.position} — ${data.score}점 (${data.category})`);
+        } else {
+          failed++;
+          logLine(`⚠️ 공고 #${data.job_id} 매칭 실패: ${data.error}`);
+        }
+      } else if (ev === 'error') {
+        logLine('⚠️ ' + data.message);
+      } else if (ev === 'done') {
+        toast(`매칭 완료: ${data.matched}건 성공${data.failed ? `, ${data.failed}건 실패` : ''}`, 4000);
+      }
+    });
+    if (matched > 0) location.reload();
+  } catch (e) {
+    logLine('⚠️ 요청 중 오류: ' + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = '전체 공고 매칭 실행';
+  }
+}
+</script>
+{% endblock %}

@@ -151,12 +151,18 @@ def _score(verdicts: List[ConditionVerdict]):
     required_hit = (sum(_VERDICT_WEIGHT[v.verdict] for v in required) / len(required)) if required else 1.0
     preferred_hit = (sum(_VERDICT_WEIGHT[v.verdict] for v in preferred) / len(preferred)) if preferred else 0.0
     score = (required_hit * 0.7 + preferred_hit * 0.3) * 100
-    category = '부적합'
+    return required_hit, preferred_hit, score, classify(required_hit)
+
+
+def classify(required_hit: float) -> str:
+    """필수 충족률(0~1)만으로 적합/도전/부적합을 가른다 (ROADMAP S5-1 문구 그대로 — 종합
+    점수가 아니라 필수 충족률 기준). matches 테이블에는 이 값이 그대로 저장되지 않고
+    required_hit 만 저장되므로, 나중에(S5-2 웹 UI 등) 분류가 다시 필요하면 이 함수로
+    required_hit 에서 재계산한다 — 임계값을 두 곳에 따로 두면 어긋날 수 있어서다."""
     for name, threshold in CATEGORY_THRESHOLDS:
         if required_hit >= threshold:
-            category = name
-            break
-    return required_hit, preferred_hit, score, category
+            return name
+    return '부적합'
 
 
 def match_job(user: str, job_id: int, exp_dir: Path, db_path=None, model=None) -> MatchResult:
