@@ -12,6 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from lib import db  # noqa: E402
 from web import create_app  # noqa: E402
 
 EXPECTED_ROUTES = {
@@ -72,6 +73,24 @@ class RouteStructureTest(WebTestBase):
     def test_route_table_unchanged(self):
         actual = {(r.rule, m) for r in self.app.url_map.iter_rules() for m in r.methods - {'HEAD', 'OPTIONS'}}
         self.assertEqual(actual, EXPECTED_ROUTES)
+
+    def test_user_page_shows_dashboard_summary(self):
+        """S9-2: 메인(개인) 대시보드에 지원 현황이 한눈에 보여야 한다."""
+        r_empty = self.c.get('/user/홍길동')
+        self.assertIn('지원 현황'.encode('utf-8'), r_empty.data)
+
+        conn = db.get_conn(self.tmp / 'app.db')
+        conn.execute(
+            "INSERT INTO jobs (source, source_job_id, company, position, required_json, preferred_json) "
+            "VALUES ('manual','0001','대시보드기업','백엔드','[]','[]')")
+        job_id = conn.execute('SELECT last_insert_rowid() AS id').fetchone()['id']
+        conn.commit()
+        conn.close()
+        self.c.post(f'/applications/홍길동/{job_id}/status', json={'status': '준비중'})
+
+        r = self.c.get('/user/홍길동')
+        body = r.get_data(as_text=True)
+        self.assertIn('대시보드기업', body)
 
     def test_debug_off_by_default(self):
         self.assertFalse(self.app.debug)

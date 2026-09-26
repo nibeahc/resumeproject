@@ -1,10 +1,19 @@
 """메인 화면: 사용자 목록, 사용자 상세, 신규 사용자."""
-from flask import Blueprint, jsonify, render_template, request
+from flask import Blueprint, current_app, jsonify, render_template, request
 
+from lib import applications, db
 from web.data import get_experiences, get_outputs, get_raw_files, get_users
 from web.paths import output_dir, project_root, user_dir, valid_segment
 
 bp = Blueprint('main', __name__)
+
+
+def _db_path():
+    """S9-2(대시보드)부터 사용자 상세 화면도 SQLite(applications)를 본다. jobs.py 등과 같은
+    이유로 DB_PATH 설정을 존중한다."""
+    path = current_app.config.get('DB_PATH')
+    db.init_db(path)
+    return path
 
 
 @bp.route('/')
@@ -21,6 +30,7 @@ def user_detail(name):
         experiences=get_experiences(name),
         outputs=get_outputs(name),
         raw=get_raw_files(name),
+        dashboard=applications.dashboard_summary(name, db_path=_db_path()),
     )
 
 

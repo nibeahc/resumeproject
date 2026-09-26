@@ -4,6 +4,13 @@
 {% block content %}
 <style>
   @keyframes spin { to { transform:rotate(360deg); } }
+  .dash-grid { display:grid; grid-template-columns:repeat(3, 1fr); gap:12px; }
+  @media (max-width:700px) { .dash-grid { grid-template-columns:1fr; } }
+  .dash-col h3 { font-size:12px; color:#6e6e73; font-weight:500; margin-bottom:8px; }
+  .dash-item { font-size:13px; padding:6px 0; border-bottom:1px solid #f0f0f5; }
+  .dash-item:last-child { border-bottom:none; }
+  .dash-item .deadline { color:#856404; font-size:11px; }
+  .dash-empty { font-size:12px; color:#6e6e73; padding:6px 0; }
 </style>
 <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:24px;">
   <div style="display:flex; align-items:center; gap:12px;">
@@ -15,6 +22,40 @@
     <a href="/matches/{{ user }}" class="btn btn-secondary">매칭 결과</a>
     <a href="/applications/{{ user }}" class="btn btn-secondary">지원 현황</a>
     <a href="/generate/{{ user }}" class="btn btn-primary">자소서 생성 →</a>
+  </div>
+</div>
+
+<!-- S9-2: 마감 임박 / 준비중 / 결과 대기 요약. lib/applications.py 의 dashboard_summary() 그대로 -->
+<div class="card">
+  <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
+    <h2 style="margin:0; font-size:14px;">지원 현황</h2>
+    <a href="/applications/{{ user }}" style="font-size:12px;">전체 보기 →</a>
+  </div>
+  <div class="dash-grid">
+    <div class="dash-col">
+      <h3>마감 임박 (7일 이내)</h3>
+      {% for a in dashboard.closing_soon %}
+      <div class="dash-item">{{ a.company }} · {{ a.position }}<br><span class="deadline">{{ a.deadline }} 마감</span></div>
+      {% else %}
+      <p class="dash-empty">없음</p>
+      {% endfor %}
+    </div>
+    <div class="dash-col">
+      <h3>준비중</h3>
+      {% for a in dashboard.in_progress %}
+      <div class="dash-item">{{ a.company }} · {{ a.position }}</div>
+      {% else %}
+      <p class="dash-empty">없음</p>
+      {% endfor %}
+    </div>
+    <div class="dash-col">
+      <h3>결과 대기</h3>
+      {% for a in dashboard.awaiting_result %}
+      <div class="dash-item">{{ a.company }} · {{ a.position }} <span class="deadline">({{ a.status }})</span></div>
+      {% else %}
+      <p class="dash-empty">없음</p>
+      {% endfor %}
+    </div>
   </div>
 </div>
 

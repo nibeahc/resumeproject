@@ -8,6 +8,7 @@ ROADMAP 이 못박은 것: **반드시 상태 변경 이력을 남긴다.** "어
 재구성해서 돌려줄 수 있게 한다(모델이나 사람의 기억이 아니라 DB 가 정본이 되도록).
 """
 from dataclasses import dataclass, field
+from datetime import date
 from typing import List, Optional
 
 from lib import db
@@ -125,6 +126,40 @@ def list_applications(user: str, db_path=None) -> List[Application]:
                              deadline=r['deadline']) for r in rows]
     finally:
         conn.close()
+
+
+IN_PROGRESS_STATUSES = ('준비중',)
+AWAITING_RESULT_STATUSES = ('지원완료', '대기')
+CLOSING_SOON_DAYS = 7  # ROADMAP S9-2: "마감 임박" 기준
+
+
+def dashboard_summary(user: str, days: int = CLOSING_SOON_DAYS, db_path=None) -> dict:
+    """ROADMAP S9-2 대시보드용 요약. 마감 임박 / 준비중 / 결과 대기 세 갈래로 나눠서 돌려준다.
+
+    새 쿼리를 짜지 않고 list_applications() 하나를 코드로 세 번 필터링한다 — 사용자 한 명의
+    지원 건수는 많아야 수십 개 수준이라, DB 쪽에서 따로 최적화할 이유가 없다.
+    """
+    apps = list_applications(user, db_path=db_path)
+    today = date.today()
+
+    closing_soon = []
+    for a in apps:
+        if not a.deadline or a.status in ('합격', '불합격'):
+            continue
+        try:
+            d = date.fromisoformat(a.deadline)
+        except ValueError:
+            continue  # "상시" 등 날짜가 아닌 값 — 마감 임박 판단에서 제외
+        days_left = (d - today).days
+        if 0 <= days_left <= days:
+            closing_soon.append((days_left, a))
+    closing_soon = [a for _, a in sorted(closing_soon, key=lambda pair: pair[0])]
+
+    return {
+        'closing_soon': closing_soon,
+        'in_progress': [a for a in apps if a.status in IN_PROGRESS_STATUSES],
+        'awaiting_result': [a for a in apps if a.status in AWAITING_RESULT_STATUSES],
+    }
 
 
 def list_available_jobs(user: str, db_path=None) -> List[dict]:
