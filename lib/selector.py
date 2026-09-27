@@ -41,6 +41,29 @@ TYPE_PREFERRED_CATEGORY = {
 _META_FIELD = re.compile(r'^- (시기|기관명|역할|카테고리|키워드): (.+)$', re.M)
 _TITLE = re.compile(r'^# (.+)$', re.M)
 
+# 고도화(2026-09-26, 사용자 요청): "순수 문자열 매칭이라 동의어를 모른다"는 S3-1 의 알려진
+# 한계(실측: "해외" 문항이 "글로벌"/"호주" 키워드를 단 경험과 연결되지 않음)를 줄인다.
+# LLM 을 쓰면 바로 해결되지만 그러면 이 모듈 전체의 존재 이유(재현 가능성, 비용 0, 근거 투명성)
+# 가 없어진다 — 그래서 여기서도 동의어를 "판단"이 아니라 고정된 사전으로 코드화한다. 완전한
+# 동의어 커버리지는 원래 불가능하고(사전에 없는 표현은 여전히 놓친다), 목록은 이 프로젝트의
+# 실제 경험 카테고리·실측에서 반복 확인된 것들로 우선 채웠다 — 새 사각지대가 발견되면 그룹만
+# 추가하면 된다(코드 구조는 안 바뀜).
+SYNONYM_GROUPS = [
+    # 국가명은 "해외"의 동의어가 아니라 사례(instance-of)지만, 실제 경험 파일 제목에 국가명이
+    # 그대로 들어가는 경우가 흔해서(예: "호주 인턴십", "교환학생-네덜란드") 실용적으로 여기 묶어둔다.
+    # 전 세계 국가를 다 넣을 수는 없다 — 유학/인턴 목적지로 흔한 것 위주로만 채운다(완전한 목록이
+    # 아니라는 걸 알면서 하는 트레이드오프. 안 걸리는 국가는 여전히 못 잡는다).
+    {'해외', '글로벌', '국외', '외국', '교환학생', '유학', '어학연수',
+     '호주', '미국', '영국', '중국', '일본', '독일', '프랑스', '네덜란드', '캐나다', '싱가포르'},
+    {'리더십', '팀장', '리더', '주도', '총괄', '회장'},
+    {'데이터분석', '데이터', '분석', 'AI', '인공지능', '머신러닝', '데이터사이언스'},
+    {'협업', '팀워크', '소통', '커뮤니케이션', '조율', '갈등조율'},
+    {'봉사', '사회공헌', '기부', '나눔'},
+    {'창업', '스타트업', '사업기획', '기획'},
+    {'인턴', '인턴십', '실무경험', '현장경험'},
+    {'공모전', '경진대회', '해커톤', '챌린지', '수상'},
+]
+
 
 @dataclass
 class Experience:
@@ -109,6 +132,22 @@ def _matched_title_words(question: str, title: str) -> List[str]:
     return [w for w in words if w in question]
 
 
+def _matched_synonyms(question: str, exp: 'Experience') -> List[str]:
+    """문항에 등장한 표현과, 경험의 키워드/제목에 등장한 (다른) 표현이 같은 동의어 그룹에
+    속하면 그 짝을 "질문표현↔경험표현" 형태로 돌려준다. 완전히 같은 단어는 이미
+    _matched_keywords()/_matched_title_words() 가 잡으므로 여기서는 세지 않는다(이중 가산 방지)."""
+    haystack = ' '.join(exp.keywords) + ' ' + exp.title
+    found = []
+    for group in SYNONYM_GROUPS:
+        q_hit = next((t for t in group if t in question), None)
+        if not q_hit:
+            continue
+        h_hit = next((t for t in group if t != q_hit and t in haystack), None)
+        if h_hit:
+            found.append(f'{q_hit}↔{h_hit}')
+    return found
+
+
 def _recency_key(filename: str):
     """동점일 때 타이브레이커로 쓴다. 파일명 맨 앞 연도가 최근일수록 우선한다
     (0000- 은 시기 불명 취급으로 가장 낮게 둔다). 완전한 대체재는 아니지만, 점수가 같을 때
@@ -168,6 +207,11 @@ def rank_experiences(question: str, experiences: List[Experience],
         if title_matched:
             score += 1 * len(title_matched)
             reasons.append(f'문항과 겹치는 제목 단어: {", ".join(title_matched)}')
+
+        synonym_matched = _matched_synonyms(question, exp)
+        if synonym_matched:
+            score += 1.5 * len(synonym_matched)  # 정확히 같은 단어(2점)보다는 약하고, 제목 단어(1점)보다는 강한 신호
+            reasons.append(f'동의어로 연결되는 표현: {", ".join(synonym_matched)}')
 
         if preferred_category and preferred_category in exp.category:
             score += 1.5

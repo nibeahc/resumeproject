@@ -108,6 +108,53 @@ class EmphasisMatchTest(unittest.TestCase):
         self.assertFalse(S._emphasized_in_interest('가로수뜨개질 봉사', interest))
 
 
+class SynonymMatchTest(unittest.TestCase):
+    """고도화(2026-09-26): S3-1 알려진 한계였던 "해외 문항이 글로벌/호주 키워드를 단 경험과
+    연결 안 됨"을 실제로 고쳤는지 확인한다."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _exp(self, filename, title, keywords, category='전문성·직무역량'):
+        make_experience(self.tmp, filename, title, category, keywords)
+        return S.load_experience(self.tmp / filename)
+
+    def test_해외_문항이_글로벌_키워드_경험과_연결된다(self):
+        """S3-1 실측에서 실패했던 바로 그 사례."""
+        exp = self._exp('a.md', '글로벌 사회공헌단 활동', '글로벌, 봉사')
+        matched = S._matched_synonyms('해외 경험에 대해 서술하시오', exp)
+        self.assertTrue(any('해외' in m and '글로벌' in m for m in matched))
+
+    def test_해외_문항이_호주_제목_경험과_연결된다(self):
+        exp = self._exp('a.md', '호주 인턴십', '인턴')
+        matched = S._matched_synonyms('해외 경험에 대해 서술하시오', exp)
+        self.assertTrue(any('해외' in m for m in matched))
+
+    def test_동의어_매칭이_점수와_사유에_반영된다(self):
+        make_experience(self.tmp, 'a.md', '글로벌 인턴십', '전문성·직무역량', '글로벌')
+        make_experience(self.tmp, 'b.md', '무관한 경험', '리더십', '팀워크')
+        experiences = S.load_all_experiences(self.tmp)
+        _, candidates = S.rank_experiences('해외 경험을 서술하시오', experiences)
+        by_name = {c.experience.filename: c for c in candidates}
+        self.assertGreater(by_name['a.md'].score, by_name['b.md'].score)
+        self.assertTrue(any('동의어' in r for r in by_name['a.md'].reasons))
+
+    def test_완전히_같은_단어는_이중_가산되지_않는다(self):
+        """"해외" 문항에 "해외"라는 키워드가 그대로 있으면 _matched_keywords 가 이미 잡으므로
+        동의어 매칭에서는 세지 않는다(같은 신호를 두 번 점수화하지 않기 위해)."""
+        exp = self._exp('a.md', '해외 봉사활동', '해외, 봉사')
+        matched = S._matched_synonyms('해외 경험을 서술하시오', exp)
+        self.assertEqual(matched, [])
+
+    def test_무관한_경험은_동의어로도_연결되지_않는다(self):
+        exp = self._exp('a.md', '교내 스터디', '학습')
+        matched = S._matched_synonyms('해외 경험을 서술하시오', exp)
+        self.assertEqual(matched, [])
+
+
 class RankAndPickTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())

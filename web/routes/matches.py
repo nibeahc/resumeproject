@@ -10,7 +10,7 @@ import json
 
 from flask import Blueprint, Response, abort, current_app, render_template, request, stream_with_context
 
-from lib import db, matcher
+from lib import applications, db, matcher
 from web.paths import user_dir
 
 bp = Blueprint('matches', __name__)
@@ -43,6 +43,10 @@ def _latest_matches(user, db_path):
     category 는 매칭 시점에만 계산되고 DB 에는 required_hit 만 저장되므로, 여기서
     matcher.classify() 로 같은 기준(임계값)을 다시 적용해 구한다 — 임계값을 두 곳에
     복제하지 않기 위해서다.
+
+    고도화(2026-09-26): 현재 지원 상태(applications.status)도 함께 붙인다 — 매칭 결과를 보고
+    바로 이 화면에서 "관심 등록"/"상태 변경"까지 할 수 있게 하려는 것(예전에는 /applications
+    페이지로 따로 가서 드롭다운으로 공고를 다시 찾아야 했다).
     """
     conn = db.get_conn(db_path)
     try:
@@ -58,6 +62,8 @@ def _latest_matches(user, db_path):
             job = conn.execute('SELECT * FROM jobs WHERE id = ?', (r['job_id'],)).fetchone()
             if not job:
                 continue
+            app = conn.execute('SELECT status FROM applications WHERE user = ? AND job_id = ?',
+                               (user, r['job_id'])).fetchone()
             evidence = json.loads(r['evidence_json'])
             missing = json.loads(r['missing_json'])
             required = [e for e in evidence if e['kind'] == '필수']
@@ -74,6 +80,7 @@ def _latest_matches(user, db_path):
                 'linked_experiences': linked,
                 'missing': missing,
                 'matched_at': r['created_at'],
+                'app_status': app['status'] if app else None,
             })
         result.sort(key=lambda m: (CATEGORY_ORDER.get(m['category'], 9), -m['score']))
         return result
@@ -87,7 +94,8 @@ def sse(event, data):
 
 @bp.route('/matches/<name>', methods=['GET'])
 def matches_page(name):
-    return render_template('matches.html', user=name, matches=_latest_matches(name, _db_path()))
+    return render_template('matches.html', user=name, matches=_latest_matches(name, _db_path()),
+                           statuses=applications.VALID_STATUSES)
 
 
 @bp.route('/matches/<name>/run', methods=['POST'])

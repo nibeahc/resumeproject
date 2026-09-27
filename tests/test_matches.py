@@ -165,6 +165,47 @@ class MatchesRouteTest(unittest.TestCase):
         r = self.c.post('/matches/홍길동/run?job_id=../../etc')
         self.assertEqual(r.status_code, 400)
 
+    # ── 고도화(2026-09-26): 매칭 결과 화면에서 바로 지원 상태 등록/변경 ────────────────
+    def test_unregistered_job_shows_no_status_badge_but_offers_registration(self):
+        conn = db.get_conn(self.db_path)
+        job_id = insert_job(conn, '테스트기업', '백엔드')
+        insert_match(conn, '홍길동', job_id, 1.0, 0.0, 70.0)
+        conn.commit()
+        conn.close()
+
+        r = self.c.get('/matches/홍길동')
+        body = r.get_data(as_text=True)
+        self.assertIn('미등록', body)
+        self.assertIn('관심 등록...', body)
+
+    def test_registered_job_shows_current_status_badge(self):
+        from lib import applications
+        conn = db.get_conn(self.db_path)
+        job_id = insert_job(conn, '테스트기업', '백엔드')
+        insert_match(conn, '홍길동', job_id, 1.0, 0.0, 70.0)
+        conn.commit()
+        conn.close()
+        applications.set_status('홍길동', job_id, '준비중', db_path=self.db_path)
+
+        r = self.c.get('/matches/홍길동')
+        body = r.get_data(as_text=True)
+        self.assertIn('status-준비중', body)
+        self.assertIn('상태 변경...', body)
+
+    def test_status_change_from_matches_page_updates_applications(self):
+        from lib import applications
+        conn = db.get_conn(self.db_path)
+        job_id = insert_job(conn, '테스트기업', '백엔드')
+        insert_match(conn, '홍길동', job_id, 1.0, 0.0, 70.0)
+        conn.commit()
+        conn.close()
+
+        r = self.c.post(f'/applications/홍길동/{job_id}/status', json={'status': '관심'})
+        self.assertTrue(r.get_json()['success'])
+
+        history = applications.get_history('홍길동', job_id, db_path=self.db_path)
+        self.assertEqual([h.to_status for h in history], ['관심'])
+
 
 if __name__ == '__main__':
     unittest.main()

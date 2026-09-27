@@ -12,6 +12,15 @@
   .tag-missing { background:#fff3cd; }
   #runLog { font-size:12px; color:#6e6e73; line-height:1.8; margin-top:10px; }
   .reason { font-size:12px; color:#6e6e73; }
+  .status-badge { display:inline-block; padding:2px 10px; border-radius:99px; font-size:11px; font-weight:600; }
+  .status-관심 { background:#e8e8ed; color:#3a3a3c; }
+  .status-준비중 { background:#fff3cd; color:#856404; }
+  .status-지원완료 { background:#d0e7ff; color:#004a99; }
+  .status-합격 { background:#d1e7dd; color:#0a3622; }
+  .status-불합격 { background:#fde2e1; color:#8a1c1c; }
+  .status-대기 { background:#e8e8ed; color:#6e6e73; }
+  select.status-select { font-size:11px; padding:3px 6px; border-radius:6px; border:1px solid #d2d2d7; margin-top:4px; }
+  .rematch-btn { font-size:11px; padding:3px 8px; }
 </style>
 
 <div style="margin-bottom:20px; font-size:13px; color:#6e6e73;">
@@ -36,7 +45,7 @@
       <thead>
         <tr>
           <th>공고</th><th>점수</th><th>분류</th><th>추천 이유</th>
-          <th>연결되는 경험</th><th>부족한 조건</th>
+          <th>연결되는 경험</th><th>부족한 조건</th><th>지원 상태</th><th></th>
         </tr>
       </thead>
       <tbody>
@@ -62,6 +71,25 @@
               <span class="tag tag-missing" title="{{ miss.note }}">{{ miss.condition }}</span>
             {% endfor %}
             {% if not m.missing %}<span class="reason">-</span>{% endif %}
+          </td>
+          <td>
+            <!-- 고도화: 매칭 결과를 보고 바로 여기서 관심 등록/상태 변경까지 한다 (예전엔
+                 /applications 로 따로 가서 드롭다운으로 공고를 다시 찾아야 했다) -->
+            {% if m.app_status %}
+            <span class="status-badge status-{{ m.app_status }}">{{ m.app_status }}</span>
+            {% else %}
+            <span class="reason">미등록</span>
+            {% endif %}
+            <br>
+            <select class="status-select" onchange="changeStatus({{ m.job_id }}, this.value, this)">
+              <option value="">{{ '상태 변경...' if m.app_status else '관심 등록...' }}</option>
+              {% for s in statuses %}
+              <option value="{{ s }}" {% if s == m.app_status %}disabled{% endif %}>{{ s }}</option>
+              {% endfor %}
+            </select>
+          </td>
+          <td>
+            <button class="btn btn-secondary rematch-btn" onclick="rematch({{ m.job_id }}, this)">다시 매칭</button>
           </td>
         </tr>
         {% endfor %}
@@ -104,6 +132,41 @@ function logLine(text) {
   const div = document.createElement('div');
   div.textContent = text;
   log.appendChild(div);
+}
+
+async function changeStatus(jobId, status, selectEl) {
+  if (!status) return;
+  const res = await fetch(`/applications/{{ user }}/${jobId}/status`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status, note: '' }),
+  }).then(r => r.json());
+  selectEl.value = '';
+  if (res.success) { toast(`상태 변경: ${status}`); location.reload(); }
+  else toast('⚠️ ' + (res.error || '변경 실패'));
+}
+
+async function rematch(jobId, btn) {
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = '매칭 중...';
+  try {
+    const res = await fetch(`/matches/{{ user }}/run?job_id=${jobId}`, { method: 'POST' });
+    let ok = false, errorMsg = null;
+    await consumeSSE(res, (ev, data) => {
+      if (ev === 'progress') {
+        if (data.ok) { ok = true; toast(`✅ ${data.company} · ${data.position} — ${data.score}점 (${data.category})`); }
+        else errorMsg = data.error;
+      } else if (ev === 'error') {
+        errorMsg = data.message;
+      }
+    });
+    if (ok) location.reload();
+    else if (errorMsg) toast('⚠️ ' + errorMsg);
+  } catch (e) {
+    toast('⚠️ 요청 중 오류: ' + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = original;
+  }
 }
 
 async function runMatch() {
