@@ -102,6 +102,13 @@ class RouteStructureTest(WebTestBase):
         self.assertEqual(self.c.get('/experience/홍길동/a.md').status_code, 200)
         self.assertEqual(self.c.get('/output/홍길동/x.md').status_code, 200)
 
+    def test_elicit_link_visible_even_when_experiences_already_exist(self):
+        """회귀 방지: /elicit 링크가 예전엔 경험이 0개일 때만 보여서, 경험이 하나라도 있으면
+        화면에서 대화로 경험을 더 추가할 방법이 사라졌었다(사용자가 실제로 겪고 지적함)."""
+        r = self.c.get('/user/홍길동')  # WebTestBase 의 홍길동은 이미 경험 a.md 를 갖고 있다
+        body = r.get_data(as_text=True)
+        self.assertIn(f'/elicit/홍길동', body)
+
     def test_output_subfolder_path_served(self):
         """S7 부터 outputs/[이름]/[기업]_[직무]/*.md 서브폴더가 생겼다 — /output 라우트가
         <path:filename> 으로 슬래시 있는 경로도 서빙해야 한다."""

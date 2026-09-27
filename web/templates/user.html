@@ -68,6 +68,12 @@
 <!-- 경험 DB -->
 <div id="tab-experiences">
   {% if experiences %}
+  <!-- 경험이 이미 있어도 하나 더 추가하고 싶을 수 있다 — 예전엔 이 링크가 경험이 0개일 때만
+       보여서, 경험이 하나라도 있으면 /elicit 로 갈 방법이 화면에서 사라졌다 -->
+  <div style="display:flex; justify-content:flex-end; gap:8px; margin-bottom:10px;">
+    <button type="button" class="btn btn-secondary btn-sm" onclick="showTab('upload')">파일 업로드에서 추가</button>
+    <a href="/elicit/{{ user }}" class="btn btn-primary btn-sm">대화로 경험 추가 →</a>
+  </div>
   <div class="card" style="padding:0; overflow:hidden;">
     <table>
       <thead><tr><th>활동명</th><th>시기</th><th></th></tr></thead>
@@ -210,14 +216,14 @@
 {% block scripts %}
 <script>
 // tabs
-document.querySelectorAll('.tab').forEach(tab => {
-  tab.addEventListener('click', () => {
-    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-    tab.classList.add('active');
-    ['experiences','outputs','upload'].forEach(id => {
-      document.getElementById('tab-'+id).style.display = id === tab.dataset.tab ? '' : 'none';
-    });
+function showTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+  ['experiences','outputs','upload'].forEach(id => {
+    document.getElementById('tab-'+id).style.display = id === name ? '' : 'none';
   });
+}
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => showTab(tab.dataset.tab));
 });
 
 // upload
