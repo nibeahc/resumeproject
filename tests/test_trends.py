@@ -183,6 +183,28 @@ class ResearchTrendsTest(unittest.TestCase):
             result = trends.research_trends()
         self.assertFalse(result.ok)
 
+    def test_truncated_response_reported_as_error_not_saved(self):
+        """실측(2026-09-27)으로 발견한 버그의 회귀 테스트: max_tokens=2048 이던 시절 실제
+        리서치가 문장 중간에 잘렸는데(예: "쉼표나 별표 같은 기") 그대로 저장돼 화면에 노출됐다.
+        stop_reason 이 'max_tokens' 면 텍스트가 있어도 실패로 취급해야 한다."""
+        blocks = [FakeBlock(type='text', text='## 3. AI 문체\n쉼표나 별표 같은 기')]
+        with patch.object(trends, '_get_client') as get_client:
+            response = fake_response(blocks)
+            response.stop_reason = 'max_tokens'
+            get_client.return_value.messages.create.return_value = response
+            result = trends.research_trends()
+        self.assertFalse(result.ok)
+        self.assertIn('max_tokens', result.error)
+
+    def test_requests_enough_max_tokens_for_full_report(self):
+        """2048 은 실측에서 5개 항목 + 인용을 다 쓰기 전에 잘렸다 — 넉넉한 값으로 올렸는지 확인."""
+        blocks = [FakeBlock(type='text', text='내용')]
+        with patch.object(trends, '_get_client') as get_client:
+            get_client.return_value.messages.create.return_value = fake_response(blocks)
+            trends.research_trends()
+            kwargs = get_client.return_value.messages.create.call_args.kwargs
+        self.assertGreaterEqual(kwargs['max_tokens'], 8192)
+
 
 class EnsureFreshTest(unittest.TestCase):
     def setUp(self):

@@ -2,24 +2,44 @@
 {% block title %}자소서 작성 트렌드{% endblock %}
 
 {% block content %}
-<div style="margin-bottom:20px; font-size:13px; color:#6e6e73;">
+<style>
+  #trendsContent h1, #trendsContent h2, #trendsContent h3 { margin-top:20px; margin-bottom:10px; }
+  #trendsContent h1:first-child, #trendsContent h2:first-child { margin-top:0; }
+  #trendsContent p { margin-bottom:10px; line-height:1.8; }
+  #trendsContent ul, #trendsContent ol { margin:0 0 10px 22px; line-height:1.8; }
+  #trendsContent blockquote { border-left:3px solid var(--rule); padding-left:12px; color:var(--ink-soft);
+                               margin:0 0 10px; font-size:13px; }
+  #trendsContent hr { border:none; border-top:1px solid var(--rule); margin:16px 0; }
+  #trendsContent table { margin-bottom:10px; }
+</style>
+
+<div style="margin-bottom:20px; font-size:13px; color:var(--ink-soft);">
   <a href="/">홈</a>
   <span style="margin:0 6px;">›</span>
   자소서 작성 트렌드
 </div>
 
 <h1 style="margin-bottom:8px;">자소서 작성 트렌드</h1>
-<p style="color:#6e6e73; font-size:13px; margin-bottom:20px;">
+<p style="color:var(--ink-soft); font-size:13px; margin-bottom:20px;">
   Anthropic web_search 도구로 한 달에 한 번 자동 조사됩니다. 자소서 생성 시 참고용으로만
   쓰이고, 사용자의 writing-style.md/writing-rules.md 가 항상 우선합니다.
 </p>
 
 <div class="card">
   {% if content %}
-  <div style="white-space:pre-wrap; line-height:1.8; font-size:14px;">{{ content }}</div>
+  <div id="trendsContent" style="font-size:14px;"></div>
   {% else %}
   <p class="empty">아직 조사된 트렌드가 없습니다. 사용자 페이지를 한 번 열면 백그라운드에서
     자동으로 조사가 시작됩니다(완료까지 다소 시간이 걸릴 수 있습니다).</p>
   {% endif %}
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/markdown.js"></script>
+{% if content %}
+<script>
+document.getElementById('trendsContent').innerHTML = renderMarkdown({{ content|tojson }});
+</script>
+{% endif %}
 {% endblock %}

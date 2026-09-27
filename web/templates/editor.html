@@ -3,7 +3,7 @@
 
 {% block content %}
 <div style="display:flex; align-items:center; gap:12px; margin-bottom:20px;">
-  <a href="/user/{{ user }}" style="color:#6e6e73; font-size:13px;">← {{ user }}</a>
+  <a href="/user/{{ user }}" style="color:var(--ink-soft); font-size:13px;">← {{ user }}</a>
   <h1 style="margin:0; font-size:18px;">{{ filename }}</h1>
   <span class="badge {% if kind=='output' %}badge-ok{% else %}badge-warn{% endif %}"
         style="font-size:11px;">
@@ -13,7 +13,7 @@
 
 <div class="card" style="padding:0; overflow:hidden;">
   <div style="display:flex; align-items:center; justify-content:space-between;
-              padding:12px 16px; border-bottom:1px solid #d2d2d7; background:#f5f5f7;">
+              padding:12px 16px; border-bottom:1px solid var(--rule); background:var(--surface-sunk);">
     <div style="display:flex; gap:8px;">
       <button class="btn btn-secondary btn-sm" id="btnPreview" onclick="setMode('preview')">미리보기</button>
       <button class="btn btn-secondary btn-sm" id="btnEdit" onclick="setMode('edit')">편집</button>
@@ -24,16 +24,26 @@
     <button class="btn btn-primary btn-sm" onclick="save()">저장</button>
   </div>
 
-  <!-- 미리보기 -->
-  <div id="preview" style="padding:24px; line-height:1.8; font-size:14px; white-space:pre-wrap;">{{ content }}</div>
+  <!-- 미리보기 (고도화 2026-09-27: 마크다운을 그대로 렌더링한다 — 예전엔 #, ** 같은 문법
+       기호가 그대로 화면에 보였다) -->
+  <style>
+    #preview h1, #preview h2, #preview h3 { margin-top:18px; margin-bottom:8px; }
+    #preview h1:first-child, #preview h2:first-child { margin-top:0; }
+    #preview p { margin-bottom:10px; line-height:1.8; }
+    #preview ul, #preview ol { margin:0 0 10px 22px; line-height:1.8; }
+    #preview blockquote { border-left:3px solid var(--rule); padding-left:12px; color:var(--ink-soft);
+                           margin:0 0 10px; font-size:13px; }
+    #preview hr { border:none; border-top:1px solid var(--rule); margin:14px 0; }
+  </style>
+  <div id="preview" style="padding:24px; font-size:14px;"></div>
 
   <!-- 편집기 -->
   <textarea id="editor" style="display:none; width:100%; min-height:600px; padding:20px;
             font-family:'Menlo','Monaco','Courier New',monospace; font-size:13px;
-            line-height:1.7; border:none; outline:none; resize:vertical; background:#fff;">{{ content }}</textarea>
+            line-height:1.7; border:none; outline:none; resize:vertical; background:var(--surface); color:var(--ink);">{{ content }}</textarea>
 </div>
 
-<p style="font-size:12px; color:#6e6e73; margin-top:8px;">
+<p style="font-size:12px; color:var(--ink-soft); margin-top:8px;">
   경로: {{ 'outputs' if kind=='output' else 'users/'+user+'/experiences' }}/{{ filename }}
 </p>
 
@@ -41,29 +51,34 @@
 <!-- S8-1: 저장할 때마다 버전이 쌓인다. 여기서 이전 버전을 열어보거나 두 버전을 비교한다. -->
 <div class="card" id="versionCard" style="margin-top:8px;">
   <h2 style="margin-bottom:10px; font-size:14px;">버전 히스토리</h2>
-  <div id="versionList" style="font-size:13px; color:#6e6e73;">불러오는 중...</div>
+  <div id="versionList" style="font-size:13px; color:var(--ink-soft);">불러오는 중...</div>
   <div id="diffControls" style="display:none; margin-top:10px; gap:8px; align-items:center;">
     <select class="form-input" id="diffA" style="width:auto;"></select>
-    <span style="font-size:12px; color:#6e6e73;">→</span>
+    <span style="font-size:12px; color:var(--ink-soft);">→</span>
     <select class="form-input" id="diffB" style="width:auto;"></select>
     <button class="btn btn-secondary btn-sm" onclick="showDiff()">비교</button>
   </div>
-  <pre id="diffText" style="display:none; margin-top:12px; background:#f5f5f7; border-radius:8px;
+  <pre id="diffText" style="display:none; margin-top:12px; background:var(--surface-sunk); border-radius:8px;
        padding:12px; font-size:12px; line-height:1.6; overflow-x:auto; white-space:pre-wrap;"></pre>
 </div>
 {% endif %}
 {% endblock %}
 
 {% block scripts %}
+<script src="/static/markdown.js"></script>
 <script>
 let currentMode = 'preview';
+
+function renderPreview(text) {
+  document.getElementById('preview').innerHTML = renderMarkdown(text);
+}
 
 function setMode(mode) {
   currentMode = mode;
   document.getElementById('preview').style.display = mode==='preview' ? '' : 'none';
   document.getElementById('editor').style.display  = mode==='edit'    ? '' : 'none';
-  document.getElementById('btnPreview').style.background = mode==='preview' ? '#d2d2d7' : '';
-  document.getElementById('btnEdit').style.background    = mode==='edit'    ? '#d2d2d7' : '';
+  document.getElementById('btnPreview').style.background = mode==='preview' ? 'var(--rule)' : '';
+  document.getElementById('btnEdit').style.background    = mode==='edit'    ? 'var(--rule)' : '';
 }
 
 async function save() {
@@ -76,7 +91,7 @@ async function save() {
   }).then(r=>r.json());
 
   if (res.success) {
-    document.getElementById('preview').textContent = content;
+    renderPreview(content);
     toast(res.version ? `저장 완료 (v${res.version})` : '저장 완료');
     if (document.getElementById('versionList')) loadVersions();
   } else {
@@ -85,6 +100,7 @@ async function save() {
 }
 
 // 초기 상태: 미리보기
+renderPreview({{ content|tojson }});
 setMode('preview');
 
 // S8-1: 버전 히스토리 (kind === 'output' 일 때만 이 요소가 존재한다)

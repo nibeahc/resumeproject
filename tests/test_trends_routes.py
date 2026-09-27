@@ -2,6 +2,7 @@
 전부 스텁으로 막는다 — 특히 TESTING 가드가 실제로 동작하는지가 핵심이다(안 그러면 이
 프로젝트의 거의 모든 웹 테스트가 GET /user/<name> 을 거칠 때마다 실제 API 를 호출하게 된다).
 """
+import json
 import shutil
 import sys
 import tempfile
@@ -38,7 +39,13 @@ class TrendsPageTest(unittest.TestCase):
         (trends_dir / 'coverletter-trends.md').write_text(
             '# 자소서 작성 트렌드\n\n## 구조\n두괄식 선호', encoding='utf-8')
         r = self.c.get('/trends')
-        self.assertIn('두괄식 선호'.encode('utf-8'), r.data)
+        # 고도화(2026-09-27)로 렌더링이 클라이언트 마크다운 파서로 옮겨가면서, 본문은
+        # 리터럴 UTF-8 텍스트가 아니라 |tojson 으로 이스케이프된 JS 문자열 리터럴로
+        # 응답에 들어간다 (예: "두괄식" → "두괄식"). 실제 페이지에서는
+        # markdown.js 가 이를 파싱해 화면에 렌더링한다.
+        body = r.data.decode('utf-8')
+        expected = json.dumps('두괄식 선호')[1:-1]  # 앞뒤 큰따옴표 제외한 이스케이프 본문
+        self.assertIn(expected, body)
 
 
 class BackgroundRefreshWiringTest(unittest.TestCase):

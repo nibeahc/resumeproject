@@ -6,14 +6,22 @@
   @keyframes spin { to { transform:rotate(360deg); } }
   .dash-grid { display:grid; grid-template-columns:repeat(3, 1fr); gap:12px; }
   @media (max-width:700px) { .dash-grid { grid-template-columns:1fr; } }
-  .dash-col h3 { font-size:12px; color:#6e6e73; font-weight:500; margin-bottom:8px; }
-  .dash-item { font-size:13px; padding:6px 0; border-bottom:1px solid #f0f0f5; }
+  .dash-tile { border:1px solid var(--rule); border-radius:10px; padding:14px; background:var(--surface-sunk); }
+  .dash-tile .count { font-family:'IBM Plex Mono', monospace; font-size:22px; font-weight:600; line-height:1; }
+  .dash-tile.warn .count { color:var(--st-warn); }
+  .dash-tile.progress .count { color:var(--st-progress); }
+  .dash-tile.wait .count { color:var(--st-wait); }
+  .dash-tile h3 { font-size:12px; color:var(--ink-soft); font-weight:500; margin:6px 0 8px; }
+  .dash-item { font-size:13px; padding:6px 0; border-bottom:1px solid var(--rule); }
   .dash-item:last-child { border-bottom:none; }
-  .dash-item .deadline { color:#856404; font-size:11px; }
-  .dash-empty { font-size:12px; color:#6e6e73; padding:6px 0; }
+  .dash-item .deadline { color:var(--st-warn); font-size:11px; font-family:'IBM Plex Mono', monospace; }
+  .dash-empty { font-size:12px; color:var(--ink-faint); padding:6px 0; }
   .update-banner { display:flex; align-items:center; justify-content:space-between; gap:12px;
-                    background:#eef6ff; border:1px solid #bcdcff; border-radius:10px;
-                    padding:10px 16px; margin-bottom:16px; font-size:13px; color:#004a99; }
+                    background:var(--accent-soft); border:1px solid var(--accent); border-radius:10px;
+                    padding:10px 16px; margin-bottom:16px; font-size:13px; color:var(--accent); }
+  .back-link { color:var(--ink-soft); font-size:13px; }
+  .muted { color:var(--ink-soft); }
+  .faint { color:var(--ink-faint); }
 </style>
 
 {% if trends_recent %}
@@ -24,12 +32,12 @@
 </div>
 {% endif %}
 
-<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:24px;">
+<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:24px; flex-wrap:wrap; gap:12px;">
   <div style="display:flex; align-items:center; gap:12px;">
-    <a href="/" style="color:#6e6e73; font-size:13px;">← 홈</a>
+    <a href="/" class="back-link">← 홈</a>
     <h1 style="margin:0">{{ user }}</h1>
   </div>
-  <div style="display:flex; gap:8px;">
+  <div style="display:flex; gap:8px; flex-wrap:wrap;">
     <a href="/profile/{{ user }}/setup" class="btn btn-secondary">프로필 수정</a>
     <a href="/matches/{{ user }}" class="btn btn-secondary">매칭 결과</a>
     <a href="/applications/{{ user }}" class="btn btn-secondary">지원 현황</a>
@@ -40,30 +48,33 @@
 <!-- S9-2: 마감 임박 / 준비중 / 결과 대기 요약. lib/applications.py 의 dashboard_summary() 그대로 -->
 <div class="card">
   <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
-    <h2 style="margin:0; font-size:14px;">지원 현황</h2>
+    <h2 style="margin:0;">지원 현황</h2>
     <a href="/applications/{{ user }}" style="font-size:12px;">전체 보기 →</a>
   </div>
   <div class="dash-grid">
-    <div class="dash-col">
+    <div class="dash-tile warn">
+      <div class="count">{{ dashboard.closing_soon|length }}</div>
       <h3>마감 임박 (7일 이내)</h3>
       {% for a in dashboard.closing_soon %}
-      <div class="dash-item">{{ a.company }} · {{ a.position }}<br><span class="deadline">{{ a.deadline }} 마감</span></div>
+      <div class="dash-item">{{ a.company }}, {{ a.position }}<br><span class="deadline">{{ a.deadline }} 마감</span></div>
       {% else %}
       <p class="dash-empty">없음</p>
       {% endfor %}
     </div>
-    <div class="dash-col">
+    <div class="dash-tile progress">
+      <div class="count">{{ dashboard.in_progress|length }}</div>
       <h3>준비중</h3>
       {% for a in dashboard.in_progress %}
-      <div class="dash-item">{{ a.company }} · {{ a.position }}</div>
+      <div class="dash-item">{{ a.company }}, {{ a.position }}</div>
       {% else %}
       <p class="dash-empty">없음</p>
       {% endfor %}
     </div>
-    <div class="dash-col">
+    <div class="dash-tile wait">
+      <div class="count">{{ dashboard.awaiting_result|length }}</div>
       <h3>결과 대기</h3>
       {% for a in dashboard.awaiting_result %}
-      <div class="dash-item">{{ a.company }} · {{ a.position }} <span class="deadline">({{ a.status }})</span></div>
+      <div class="dash-item">{{ a.company }}, {{ a.position }} <span class="deadline">({{ a.status }})</span></div>
       {% else %}
       <p class="dash-empty">없음</p>
       {% endfor %}
@@ -96,7 +107,7 @@
             {% if e.warn %}<span class="warn-icon">⚠️</span> {% endif %}
             <a href="/experience/{{ user }}/{{ e.filename }}">{{ e.name }}</a>
           </td>
-          <td style="color:#6e6e73; white-space:nowrap;">{{ e.date }}</td>
+          <td class="muted mono" style="white-space:nowrap;">{{ e.date }}</td>
           <td><a href="/experience/{{ user }}/{{ e.filename }}" class="btn btn-secondary btn-sm">열기</a></td>
         </tr>
         {% endfor %}
@@ -140,20 +151,21 @@
 <div id="tab-upload" style="display:none;">
   <div class="card">
     <h2>원본 파일 업로드</h2>
-    <p style="color:#6e6e73; font-size:13px; margin-bottom:20px;">
+    <p class="muted" style="font-size:13px; margin-bottom:20px;">
       지원 형식: .hwpx .hwp .docx .pdf .md .txt
     </p>
 
     <div style="margin-bottom:16px;">
       <label style="font-size:13px; font-weight:500; display:block; margin-bottom:6px;">폴더 선택</label>
-      <select id="uploadKind" style="padding:8px 12px; border:1px solid #d2d2d7; border-radius:8px; font-size:13px; width:100%;">
+      <select id="uploadKind" style="padding:8px 12px; border:1px solid var(--rule); border-radius:8px;
+              font-size:13px; width:100%; background:var(--surface); color:var(--ink);">
         <option value="apply">apply/ — 자소서, 지원서, 신청서 등</option>
         <option value="logs">logs/ — 소감문, 활동일지, 결과보고서 등</option>
       </select>
     </div>
 
     <div id="dropzone"
-         style="border:2px dashed #d2d2d7; border-radius:12px; padding:40px; text-align:center;
+         style="border:2px dashed var(--rule); border-radius:12px; padding:40px; text-align:center;
                 cursor:pointer; transition:border-color .15s, background .15s;"
          onclick="document.getElementById('fileInput').click()"
          ondragover="onDragOver(event)"
@@ -161,12 +173,12 @@
          ondrop="onDrop(event)">
       <div style="font-size:32px; margin-bottom:8px;">📂</div>
       <p style="font-weight:500; margin-bottom:4px;">클릭하거나 파일을 여기에 드래그하세요</p>
-      <p style="color:#6e6e73; font-size:12px;">여러 파일 동시 업로드 가능</p>
+      <p class="faint" style="font-size:12px;">여러 파일 동시 업로드 가능</p>
     </div>
     <input id="fileInput" type="file" multiple style="display:none" onchange="uploadFiles(this.files)">
 
     <div id="uploadResult" style="margin-top:16px; display:none;">
-      <div class="card" style="background:#f5f5f7; border:none; padding:12px 16px;">
+      <div class="card" style="background:var(--surface-sunk); border:none; padding:12px 16px;">
         <div id="uploadMsg" style="font-size:13px;"></div>
       </div>
     </div>
@@ -175,7 +187,7 @@
   <!-- 파싱 (S1-2) -->
   <div class="card">
     <h2>경험 DB 생성</h2>
-    <p style="color:#6e6e73; font-size:13px; margin-bottom:16px;">
+    <p class="muted" style="font-size:13px; margin-bottom:16px;">
       raw/ 의 파일을 읽어 경험 DB(experiences/), 어투 분석(writing-style.md) 등을 자동으로 만듭니다.
       {% if experiences %}이미 경험 {{ experiences|length }}개가 있습니다. 다시 실행하면 전체를 재생성합니다.{% endif %}
     </p>
@@ -184,14 +196,14 @@
     <div id="parseProgress" style="display:none; margin-top:16px;">
       <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
         <span class="spinner" id="parseSpinner" style="display:inline-block; width:12px; height:12px; border-radius:50%;
-              border:2px solid #d2d2d7; border-top-color:#0066cc; animation:spin .7s linear infinite;"></span>
+              border:2px solid var(--rule); border-top-color:var(--accent); animation:spin .7s linear infinite;"></span>
         <span style="font-size:13px; font-weight:500;" id="parseTitle">진행 중...</span>
       </div>
-      <div id="parseLog" style="font-size:12px; color:#6e6e73; line-height:1.9; max-height:200px; overflow-y:auto;"></div>
+      <div id="parseLog" class="muted" style="font-size:12px; line-height:1.9; max-height:200px; overflow-y:auto;"></div>
     </div>
 
     <div id="parseResult" style="display:none; margin-top:16px;">
-      <div class="card" style="background:#f5f5f7; border:none;">
+      <div class="card" style="background:var(--surface-sunk); border:none;">
         <pre id="parseReport" style="font-size:12px; white-space:pre-wrap; font-family:inherit;"></pre>
       </div>
     </div>
@@ -200,22 +212,22 @@
   <!-- 현재 원본 파일 목록 -->
   <div class="card">
     <h2>현재 원본 파일</h2>
-    <p style="font-size:12px; color:#6e6e73; margin-bottom:8px; font-weight:500;">raw/apply/</p>
+    <p class="muted" style="font-size:12px; margin-bottom:8px; font-weight:500;">raw/apply/</p>
     {% if raw.apply %}
       <ul style="list-style:none; padding:0; margin-bottom:12px;">
         {% for f in raw.apply %}
-        <li style="font-size:13px; padding:4px 0; border-bottom:1px solid #f0f0f5;">📄 {{ f }}</li>
+        <li style="font-size:13px; padding:4px 0; border-bottom:1px solid var(--rule);">📄 {{ f }}</li>
         {% endfor %}
       </ul>
     {% else %}
       <p class="empty" style="margin-bottom:12px;">파일 없음</p>
     {% endif %}
 
-    <p style="font-size:12px; color:#6e6e73; margin-bottom:8px; font-weight:500;">raw/logs/</p>
+    <p class="muted" style="font-size:12px; margin-bottom:8px; font-weight:500;">raw/logs/</p>
     {% if raw.logs %}
       <ul style="list-style:none; padding:0;">
         {% for f in raw.logs %}
-        <li style="font-size:13px; padding:4px 0; border-bottom:1px solid #f0f0f5;">📄 {{ f }}</li>
+        <li style="font-size:13px; padding:4px 0; border-bottom:1px solid var(--rule);">📄 {{ f }}</li>
         {% endfor %}
       </ul>
     {% else %}
@@ -241,11 +253,11 @@ document.querySelectorAll('.tab').forEach(tab => {
 // upload
 function onDragOver(e) {
   e.preventDefault();
-  document.getElementById('dropzone').style.borderColor = '#0066cc';
-  document.getElementById('dropzone').style.background = '#f0f5ff';
+  document.getElementById('dropzone').style.borderColor = 'var(--accent)';
+  document.getElementById('dropzone').style.background = 'var(--accent-soft)';
 }
 function onDragLeave(e) {
-  document.getElementById('dropzone').style.borderColor = '#d2d2d7';
+  document.getElementById('dropzone').style.borderColor = 'var(--rule)';
   document.getElementById('dropzone').style.background = '';
 }
 function onDrop(e) {
@@ -265,7 +277,7 @@ async function uploadFiles(files) {
 
   const msg = document.getElementById('uploadMsg');
   if (res.saved.length)   msg.innerHTML += `<p>✅ 업로드 완료: ${res.saved.join(', ')}</p>`;
-  if (res.skipped.length) msg.innerHTML += `<p style="color:#856404">⚠️ 지원하지 않는 형식 (스킵): ${res.skipped.join(', ')}</p>`;
+  if (res.skipped.length) msg.innerHTML += `<p style="color:var(--st-warn)">⚠️ 지원하지 않는 형식 (스킵): ${res.skipped.join(', ')}</p>`;
   document.getElementById('uploadResult').style.display = '';
   toast(`${res.saved.length}개 파일 업로드 완료`);
 }
@@ -316,7 +328,7 @@ function parseLogLine(text) {
 function renderExtractFailure(kind, filename, note) {
   const log = document.getElementById('parseLog');
   const box = document.createElement('div');
-  box.style.cssText = 'margin:6px 0; padding:8px 10px; background:#fff3cd; border:1px solid #ffe69c; border-radius:8px;';
+  box.style.cssText = 'margin:6px 0; padding:8px 10px; background:var(--st-warn-soft); border:1px solid var(--st-warn); border-radius:8px;';
   box.innerHTML = `
     <div style="font-size:12px;">⚠️ 읽을 수 없습니다: ${escapeHtml(filename)} — ${escapeHtml(note)}</div>
     <button type="button" class="btn btn-secondary btn-sm" style="margin-top:6px;"
@@ -325,7 +337,8 @@ function renderExtractFailure(kind, filename, note) {
     </button>
     <div style="display:none; margin-top:8px;">
       <textarea rows="4" placeholder="파일을 열어서 내용을 복사한 뒤 여기에 붙여넣으세요 (최소 20자)"
-                style="width:100%; padding:8px; border:1px solid #d2d2d7; border-radius:8px; font-size:13px; font-family:inherit; resize:vertical;"></textarea>
+                style="width:100%; padding:8px; border:1px solid var(--rule); border-radius:8px; font-size:13px;
+                       font-family:inherit; resize:vertical; background:var(--surface); color:var(--ink);"></textarea>
       <button type="button" class="btn btn-primary btn-sm" style="margin-top:6px;"
               onclick="saveFallback(this, ${JSON.stringify(kind)}, ${JSON.stringify(filename)})">저장</button>
     </div>

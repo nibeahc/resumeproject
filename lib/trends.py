@@ -106,13 +106,21 @@ def research_trends(model=None, max_uses=DEFAULT_MAX_USES) -> TrendsResult:
     try:
         response = _get_client().messages.create(
             model=model or config.model(),
-            max_tokens=2048,
+            max_tokens=8192,
             thinking={'type': 'disabled'},  # lib/llm.py 와 같은 이유 — thinking 이 켜지면 max_tokens 를 다 먹을 수 있다
             messages=[{'role': 'user', 'content': prompt}],
             tools=[{'type': 'web_search_20250305', 'name': 'web_search', 'max_uses': max_uses}],
         )
     except Exception as e:  # noqa: BLE001
         return TrendsResult(ok=False, error=f'API 호출 실패: {e}')
+
+    # 실측(2026-09-27)으로 발견: max_tokens=2048 이었을 때 5개 항목 + 인용을 다 쓰기 전에
+    # 출력이 잘렸는데, 잘린 문장이 그대로 저장되어 화면에 "쉼표나 별표 같은 기" 처럼 문장이
+    # 끊긴 채 노출됐다. 잘린 결과를 조용히 저장하지 않고 실패로 취급한다 — 이 프로젝트의
+    # "코드가 검증할 수 있으면 LLM 의 자체 보고를 믿지 않는다" 원칙 그대로(다른 잘림도 이
+    # 방식으로 잡힌다. max_tokens 를 8192 로 올린 것과는 별개의 안전장치).
+    if response.stop_reason == 'max_tokens':
+        return TrendsResult(ok=False, error='응답이 max_tokens 에서 잘렸습니다 (내용 미완성, 저장하지 않음).')
 
     body, sources = _extract_text_and_citations(response.content)
     body = _strip_leading_narration(body)
