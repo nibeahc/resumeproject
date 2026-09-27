@@ -11,7 +11,19 @@
   .dash-item:last-child { border-bottom:none; }
   .dash-item .deadline { color:#856404; font-size:11px; }
   .dash-empty { font-size:12px; color:#6e6e73; padding:6px 0; }
+  .update-banner { display:flex; align-items:center; justify-content:space-between; gap:12px;
+                    background:#eef6ff; border:1px solid #bcdcff; border-radius:10px;
+                    padding:10px 16px; margin-bottom:16px; font-size:13px; color:#004a99; }
 </style>
+
+{% if trends_recent %}
+<!-- 고도화(2026-09-27, 사용자 요청): "대시보드에도 업데이트 사항 있다 ~~ 형식으로 공지" -->
+<div class="update-banner">
+  <span>📢 자소서 트렌드가 업데이트됐어요 ({{ trends_updated }} 기준) — 최신 트렌드를 반영해 자소서를 작성합니다.</span>
+  <a href="/trends" class="btn btn-secondary btn-sm" style="white-space:nowrap;">확인하기 →</a>
+</div>
+{% endif %}
+
 <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:24px;">
   <div style="display:flex; align-items:center; gap:12px;">
     <a href="/" style="color:#6e6e73; font-size:13px;">← 홈</a>

@@ -21,13 +21,13 @@ from pathlib import Path
 from flask import (Blueprint, Response, current_app, jsonify, redirect, render_template,
                    request, stream_with_context, url_for)
 
-from lib import db, matcher, portfolio, resume
+from lib import db, matcher, portfolio, resume, trends
 from lib.llm import stream_complete
 from lib.resume import _safe_folder_name
 from lib.selector import select as select_experiences
 from lib.skills import load_skill
 from web.data import get_open_jobs
-from web.paths import output_dir, project_root, safe_path, user_dir, valid_segment
+from web.paths import output_dir, project_root, safe_path, trends_path, user_dir, valid_segment
 
 
 def _db_path():
@@ -66,7 +66,7 @@ def read_if_exists(path: Path):
 
 def build_prompt(name, company, position, question, char_limit, count_mode,
                   profile_text, style_text, rules_text, interest_text,
-                  company_text, reference_texts, selected_experiences):
+                  company_text, reference_texts, selected_experiences, trends_text=''):
     exp_dump = '\n\n'.join(f'--- users/{name}/experiences/{fn} ---\n{text}' for fn, text in selected_experiences)
     ref_dump = ('\n\n'.join(f'--- {fn} ---\n{text}' for fn, text in reference_texts)
                 if reference_texts else '(로컬 레퍼런스 없음. MCP 는 이 환경에 연결되어 있지 않으므로 Step 4 는 생략)')
@@ -78,6 +78,15 @@ def build_prompt(name, company, position, question, char_limit, count_mode,
     )
     rules_note = rules_text if rules_text.strip() else '(비어 있음 — 적용할 규칙 없음, 무시)'
     count_desc = '공백 포함' if count_mode == '포함' else '공백 제외'
+    # 고도화(2026-09-27): lib/trends.py 가 한 달에 한 번 자동 조사해두는 최신 자소서 작성
+    # 트렌드. 참고용일 뿐 writing-style.md/writing-rules.md 보다 우선하지 않는다 — Claude.md
+    # 의 "반드시 해당 사용자의 writing-style.md 어투를 따를 것" 절대 원칙이 이 트렌드 참고보다
+    # 위에 있다는 걸 프롬프트에도 명시한다(안 그러면 트렌드 문구를 어투보다 우선할 위험이 있다).
+    trends_note = (
+        trends_text.strip()
+        if trends_text.strip()
+        else '(아직 조사된 트렌드 없음 — 무시)'
+    )
 
     return f"""[요청]
 사용자: {name}
@@ -110,6 +119,10 @@ Step 2, Step 4 는 아래 안내를 따르세요. Step 9(출력 형식), Step 10
 {ref_dump}
 레퍼런스가 있어도 문장·표현·사례를 그대로 쓰지 마세요. 구조·전개 방식만 참고하고,
 표현과 사례는 반드시 아래 experiences/ 원문에서만 가져오세요.
+
+[참고: 최신 자소서 작성 트렌드 — 참고용일 뿐입니다. writing-style.md/writing-rules.md 와
+충돌하면 반드시 writing-style.md/writing-rules.md 를 따르세요]
+{trends_note}
 
 [이미 선택된 경험 — 이 안에서만 쓰세요. 다른 경험을 지어내거나 끌어오지 마세요]
 {exp_dump}
@@ -248,6 +261,7 @@ def coverletter_events(name, root, company, position, question, char_limit, coun
     rules_text = read_if_exists(root / 'writing-rules.md')
     interest_text = read_if_exists(root / '관심직무.md')
     company_text = read_if_exists(project_root() / 'companies' / f'{company}.md')
+    trends_text = trends.load_trends(trends_path()) or ''
 
     ref_dir = project_root() / 'references' / 'coverletter' / position
     reference_texts = []
@@ -275,7 +289,7 @@ def coverletter_events(name, root, company, position, question, char_limit, coun
     system = load_skill('write-coverletter')
     user_msg = build_prompt(name, company, position, question, char_limit, count_mode,
                              profile_text, style_text, rules_text, interest_text,
-                             company_text, reference_texts, selected_experiences)
+                             company_text, reference_texts, selected_experiences, trends_text)
     messages = [{'role': 'user', 'content': user_msg}]
 
     def call_llm(msgs):

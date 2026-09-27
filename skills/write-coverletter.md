@@ -173,6 +173,13 @@ index.md의 카테고리/키워드에서 문항과 관련된 경험을 찾는다
 
 ### Step 8. 문단 작성
 
+> 고도화(2026-09-27): `lib/trends.py` 가 Anthropic web_search 도구로 한 달에 한 번 자동
+> 조사해두는 최신 자소서 작성 트렌드(references/trends/coverletter-trends.md)가 있으면
+> web/routes/generate.py 가 참고 자료로 함께 첨부한다. **참고용일 뿐이다** — 아래
+> writing-style.md/writing-rules.md 와 충돌하면 반드시 writing-style.md/writing-rules.md
+> 를 따른다. 이 스킬을 대화형으로 직접 실행할 때(그 파일이 주어지지 않았을 때)는 이 문서를
+> 신경 쓰지 않아도 된다.
+
 아래 기준을 반드시 지킨다:
 
 - `writing-style.md` + `writing-rules.md` 의 어투와 문체를 따른다

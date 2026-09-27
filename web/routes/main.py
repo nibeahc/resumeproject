@@ -1,9 +1,11 @@
 """메인 화면: 사용자 목록, 사용자 상세, 신규 사용자."""
+from datetime import date
+
 from flask import Blueprint, current_app, jsonify, render_template, request
 
-from lib import applications, db
+from lib import applications, db, trends
 from web.data import get_experiences, get_outputs, get_raw_files, get_users
-from web.paths import output_dir, project_root, user_dir, valid_segment
+from web.paths import output_dir, project_root, trends_path, user_dir, valid_segment
 
 bp = Blueprint('main', __name__)
 
@@ -21,9 +23,25 @@ def index():
     return render_template('index.html', users=get_users())
 
 
+_TRENDS_BANNER_DAYS = 7  # 이 안에 갱신됐으면 대시보드에 "업데이트됨" 배너를 띄운다
+
+
 @bp.route('/user/<name>')
 def user_detail(name):
     user_dir(name)
+
+    # 고도화(2026-09-27): 페이지를 열 때마다 트렌드 문서가 오래됐는지 확인하고, 오래됐으면
+    # 페이지 로딩을 막지 않고 백그라운드에서 조용히 다시 조사한다("앱 자체가 자동으로 주기적
+    # 으로 검색"). 이번 요청에서 바로 끝나지 않으므로, 배너는 "이전에 이미 갱신되어 있던" 결과
+    # 기준으로 보여준다 — 방금 시작된 갱신은 다음 페이지 로드부터 반영된다.
+    # TESTING 모드에서는 절대 트리거하지 않는다 — 안 그러면 이 라우트를 부르는 모든 테스트가
+    # 백그라운드 스레드에서 실제 web_search API 를 호출하게 된다(과거 스트리밍 응답 patch
+    # 누락 사고와 같은 종류의 함정).
+    if not current_app.config.get('TESTING'):
+        trends.trigger_background_refresh(trends_path())
+    trends_updated = trends.last_updated(trends_path())
+    trends_recent = bool(trends_updated and (date.today() - trends_updated).days <= _TRENDS_BANNER_DAYS)
+
     return render_template(
         'user.html',
         user=name,
@@ -31,6 +49,8 @@ def user_detail(name):
         outputs=get_outputs(name),
         raw=get_raw_files(name),
         dashboard=applications.dashboard_summary(name, db_path=_db_path()),
+        trends_recent=trends_recent,
+        trends_updated=trends_updated,
     )
 
 

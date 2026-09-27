@@ -265,6 +265,28 @@ class GenerateRouteTest(unittest.TestCase):
         prompt = m.call_args.kwargs['messages'][0]['content']
         self.assertIn('다른 내용입니다', prompt)
 
+    def test_trends_document_included_in_prompt_when_present(self):
+        """고도화(2026-09-27): lib/trends.py 가 조사해둔 트렌드가 자소서 프롬프트에 실린다."""
+        trends_dir = self.root / 'references' / 'trends'
+        trends_dir.mkdir(parents=True)
+        (trends_dir / 'coverletter-trends.md').write_text(
+            '# 자소서 작성 트렌드\n\n## 구조\n두괄식 선호', encoding='utf-8')
+        fake = llm_result('===ANSWER===\n답변\n===END===\n===META===\n참조한 경험: x\n===END===\n')
+        with patch.object(generate_route, 'stream_complete', return_value=fake) as m:
+            self.post().get_data()
+        prompt = m.call_args.kwargs['messages'][0]['content']
+        self.assertIn('두괄식 선호', prompt)
+        # writing-style.md 가 우선한다는 지시가 트렌드 참고 바로 옆에 있어야 한다
+        self.assertIn('writing-style.md', prompt.split('두괄식 선호')[0][-300:])
+
+    def test_missing_trends_document_does_not_break_prompt(self):
+        fake = llm_result('===ANSWER===\n답변\n===END===\n===META===\n참조한 경험: x\n===END===\n')
+        with patch.object(generate_route, 'stream_complete', return_value=fake) as m:
+            r = self.post()
+            r.get_data()
+        prompt = m.call_args.kwargs['messages'][0]['content']
+        self.assertIn('아직 조사된 트렌드 없음', prompt)
+
     def test_selected_event_reports_question_type_and_reasons(self):
         fake = llm_result('===ANSWER===\n답변\n===END===\n===META===\n참조한 경험: x\n===END===\n')
         with patch.object(generate_route, 'stream_complete', return_value=fake):

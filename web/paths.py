@@ -47,6 +47,13 @@ def output_dir(name) -> Path:
     return safe_path(project_root() / 'outputs', name)
 
 
+def trends_path() -> Path:
+    """자소서 작성 트렌드 자동 리서치 결과 (고도화, 2026-09-27). 사용자별이 아니라 전역이다 —
+    company/jobs 처럼 project_root 바로 아래를 쓴다(사용자 입력이 아니므로 safe_path 를 거칠
+    필요가 없다)."""
+    return project_root() / 'references' / 'trends' / 'coverletter-trends.md'
+
+
 def safe_upload_name(raw):
     """업로드 파일명 정리. secure_filename 은 한글을 지우므로 쓰지 않고,
     디렉터리 성분과 위험 문자만 제거한다. 결과가 비면 None."""
