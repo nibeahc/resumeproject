@@ -1,5 +1,7 @@
 """파일 업로드, 자소서(outputs) 및 경험(experiences) 파일 보기와 저장."""
 import difflib
+import shutil
+from datetime import date, datetime
 from io import BytesIO
 from pathlib import Path
 
@@ -7,9 +9,15 @@ from flask import Blueprint, abort, current_app, jsonify, render_template, reque
 
 from lib import db, export, versions
 from web.paths import (ALLOWED_EXT, output_dir, project_root, safe_path, safe_upload_name,
-                       user_dir, valid_segment)
+                       trash_dir, user_dir, valid_segment)
 
 bp = Blueprint('documents', __name__)
+
+# 고도화(2026-09-27, 사용자 요청): "추가도 파일 업로드나 대화 없이도 추가 가능하게" — 빈
+# 템플릿으로 경험을 바로 만든다. elicit.py 의 _TEMPLATE_PATH 와 같은 이유로 project_root()
+# (테스트마다 바뀌는 PROJECT_ROOT) 가 아니라 실제 저장소의 templates/ 를 직접 가리킨다
+# (템플릿은 프로젝트 고정 자산이지 사용자별 데이터가 아니다).
+_EXPERIENCE_TEMPLATE_PATH = Path(__file__).resolve().parent.parent.parent / 'templates' / 'experience-entry.md'
 
 
 def _db_path():
@@ -155,3 +163,43 @@ def save_experience(name, filename):
     p = safe_path(project_root() / 'users', name, 'experiences', filename)
     p.write_text(request.json.get('content', ''), encoding='utf-8')
     return jsonify(success=True)
+
+
+@bp.route('/experience/<name>/<filename>/delete', methods=['POST'])
+def delete_experience(name, filename):
+    """경험 삭제(2026-09-27, 사용자 요청). 사용자 삭제(/delete-user)와 같은 안전장치를
+    쓴다 — 실제 rm 대신 _trash/ 로 옮겨서, 확인창을 잘못 눌러도 되돌릴 여지를 남긴다."""
+    p = safe_path(project_root() / 'users', name, 'experiences', filename)
+    if not p.exists():
+        return jsonify(success=False, error='파일을 찾을 수 없습니다.'), 404
+    ts = datetime.now().strftime('%Y%m%d-%H%M%S')
+    dest_dir = trash_dir() / f'{name}__experience__{ts}'
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(p), str(dest_dir / filename))
+    return jsonify(success=True)
+
+
+@bp.route('/experience/<name>/new', methods=['POST'])
+def new_experience(name):
+    """경험을 파일 업로드나 대화 없이 빈 템플릿으로 바로 추가한다(2026-09-27, 사용자 요청:
+    "추가도 파일 업로드나 대화 없이도 추가 가능하게, 템플릿만 포함된 백지로"). 활동명만 받아
+    templates/experience-entry.md 의 빈 문서를 만들고, 나머지는 편집 화면에서 사용자가
+    직접 채운다."""
+    title = (request.form.get('title') or '').strip()
+    if not title or not valid_segment(title):
+        return jsonify(success=False, error='활동명을 입력해주세요.')
+
+    exp_dir = user_dir(name) / 'experiences'
+    exp_dir.mkdir(parents=True, exist_ok=True)
+
+    stem = safe_upload_name(title) or '새경험'
+    year = date.today().year
+    filename = f'{year}-{stem}.md'
+    n = 2
+    while (exp_dir / filename).exists():
+        filename = f'{year}-{stem}_{n}.md'
+        n += 1
+
+    body = _EXPERIENCE_TEMPLATE_PATH.read_text(encoding='utf-8').replace('[활동명]', title, 1)
+    safe_path(exp_dir, filename).write_text(body, encoding='utf-8')
+    return jsonify(success=True, filename=filename)

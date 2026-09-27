@@ -19,6 +19,10 @@
       <button class="btn btn-secondary btn-sm" id="btnEdit" onclick="setMode('edit')">편집</button>
       {% if kind == 'output' %}
       <a class="btn btn-secondary btn-sm" href="/output/{{ user }}/{{ filename }}/docx">DOCX로 받기</a>
+      {% else %}
+      <!-- 사용자 요청: "상세페이지 안에 대화로 수정하기 같은 버튼" — 표에 있던 수정/보강
+           버튼을 여기로 옮겼다 -->
+      <a class="btn btn-secondary btn-sm" href="/elicit/{{ user }}?file={{ filename }}">대화로 수정하기</a>
       {% endif %}
     </div>
     <button class="btn btn-primary btn-sm" onclick="save()">저장</button>

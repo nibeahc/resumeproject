@@ -47,6 +47,12 @@ def output_dir(name) -> Path:
     return safe_path(project_root() / 'outputs', name)
 
 
+def trash_dir() -> Path:
+    """홈 화면 "사용자 삭제"(2026-09-27)가 쓰는 곳. 진짜 rm 대신 여기로 옮긴다 — 실수로
+    잘못 눌렀을 때 되살릴 수 있게(git 추적 대상 아님, .gitignore 참고)."""
+    return project_root() / '_trash'
+
+
 def trends_path() -> Path:
     """자소서 작성 트렌드 자동 리서치 결과 (고도화, 2026-09-27). 사용자별이 아니라 전역이다 —
     company/jobs 처럼 project_root 바로 아래를 쓴다(사용자 입력이 아니므로 safe_path 를 거칠

@@ -45,6 +45,24 @@ def init_db(db_path=None):
         conn.close()
 
 
+def delete_user_data(user, db_path=None):
+    """사용자 홈 화면 삭제 기능(2026-09-27)에서 쓴다. matches/applications/documents 는
+    job_id 로만 FK 가 걸려 있고 user 컬럼엔 외래키/CASCADE 가 없으므로, 파일(users/[이름],
+    outputs/[이름])을 지우는 것과 별개로 DB 쪽도 여기서 직접 지워야 한다 — 안 그러면 같은
+    이름으로 사용자를 다시 만들었을 때 예전 매칭/지원현황/문서 이력이 유령처럼 다시 보인다.
+    application_events 는 applications 에 ON DELETE CASCADE 가 걸려 있어 따로 안 지워도 된다.
+    jobs 는 여러 사용자가 같이 보는 공용 데이터라 여기서 건드리지 않는다.
+    """
+    conn = get_conn(db_path)
+    try:
+        conn.execute('DELETE FROM matches WHERE user = ?', (user,))
+        conn.execute('DELETE FROM applications WHERE user = ?', (user,))
+        conn.execute('DELETE FROM documents WHERE user = ?', (user,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def list_tables(db_path=None):
     conn = get_conn(db_path)
     try:

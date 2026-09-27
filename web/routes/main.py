@@ -1,11 +1,12 @@
-"""메인 화면: 사용자 목록, 사용자 상세, 신규 사용자."""
-from datetime import date
+"""메인 화면: 사용자 목록, 사용자 상세, 신규 사용자, 사용자 삭제."""
+import shutil
+from datetime import date, datetime
 
 from flask import Blueprint, current_app, jsonify, render_template, request
 
 from lib import applications, db, trends
 from web.data import get_experiences, get_outputs, get_raw_files, get_users
-from web.paths import output_dir, project_root, trends_path, user_dir, valid_segment
+from web.paths import output_dir, project_root, trash_dir, trends_path, user_dir, valid_segment
 
 bp = Blueprint('main', __name__)
 
@@ -72,3 +73,27 @@ def new_user():
             encoding='utf-8'
         )
     return jsonify(success=True, name=name, redirect=f'/profile/{name}/setup')
+
+
+@bp.route('/delete-user/<name>', methods=['POST'])
+def delete_user(name):
+    """홈 화면에서 사용자를 삭제한다(2026-09-27, 사용자 요청). 실제로는 rm 이 아니라
+    project_root()/_trash/ 로 옮긴다 — 화면상으로는 목록에서 즉시 사라져 "삭제됐다"와
+    똑같이 보이지만, 확인 창을 잘못 눌렀을 때를 대비해 며칠은 파일이 남아있게 하기 위함
+    (git 추적 대상은 아니므로 커밋에는 영향 없음). DB 쪽 matches/applications/documents
+    행도 같이 지운다 — 안 그러면 같은 이름을 다시 만들었을 때 예전 이력이 되살아난다.
+    """
+    udir = user_dir(name)
+    if not udir.exists():
+        return jsonify(success=False, error='존재하지 않는 사용자입니다.'), 404
+
+    ts = datetime.now().strftime('%Y%m%d-%H%M%S')
+    dest = trash_dir() / f'{name}__{ts}'
+    dest.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(udir), str(dest / 'users'))
+    odir = output_dir(name)
+    if odir.exists():
+        shutil.move(str(odir), str(dest / 'outputs'))
+
+    db.delete_user_data(name, db_path=_db_path())
+    return jsonify(success=True)

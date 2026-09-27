@@ -19,6 +19,7 @@ EXPECTED_ROUTES = {
     ('/', 'GET'),
     ('/user/<name>', 'GET'),
     ('/new-user', 'POST'),
+    ('/delete-user/<name>', 'POST'),
     ('/profile/<name>/setup', 'GET'),
     ('/profile/<name>/setup', 'POST'),
     ('/upload/<name>', 'POST'),
@@ -29,6 +30,8 @@ EXPECTED_ROUTES = {
     ('/output/<name>/<path:filename>/docx', 'GET'),
     ('/experience/<name>/<filename>', 'GET'),
     ('/experience/<name>/<filename>/save', 'POST'),
+    ('/experience/<name>/<filename>/delete', 'POST'),
+    ('/experience/<name>/new', 'POST'),
     ('/parse/<name>', 'POST'),
     ('/generate/<name>', 'POST'),
     ('/generate/<name>', 'GET'),
@@ -168,6 +171,50 @@ class RouteStructureTest(WebTestBase):
         self.assertEqual((self.root / 'users' / '홍길동' / 'experiences' / 'a.md').read_text(encoding='utf-8'), '수정됨')
 
 
+class ExperienceDeleteAndCreateTest(WebTestBase):
+    """경험 삭제 + 빈 템플릿 추가(2026-09-27, 사용자 요청)."""
+
+    def test_deleting_experience_moves_it_to_trash(self):
+        r = self.c.post('/experience/홍길동/a.md/delete')
+        self.assertTrue(r.get_json()['success'])
+        self.assertFalse((self.root / 'users' / '홍길동' / 'experiences' / 'a.md').exists())
+        trashed = list((self.root / '_trash').glob('홍길동__experience__*'))
+        self.assertEqual(len(trashed), 1)
+        self.assertTrue((trashed[0] / 'a.md').exists())
+
+    def test_deleting_missing_experience_returns_404(self):
+        r = self.c.post('/experience/홍길동/없음.md/delete')
+        self.assertEqual(r.status_code, 404)
+        self.assertFalse(r.get_json()['success'])
+
+    def test_delete_experience_path_traversal_rejected(self):
+        r = self.c.post('/experience/../secret.md/delete')
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual((self.tmp / 'secret.md').read_text(encoding='utf-8'), 'SECRET')
+
+    def test_creating_blank_experience_uses_template(self):
+        r = self.c.post('/experience/홍길동/new', data={'title': '학회 발표'})
+        data = r.get_json()
+        self.assertTrue(data['success'])
+        saved = self.root / 'users' / '홍길동' / 'experiences' / data['filename']
+        self.assertTrue(saved.exists())
+        text = saved.read_text(encoding='utf-8')
+        self.assertIn('# 학회 발표', text)
+        self.assertIn('## STAR 품질 체크', text)  # 템플릿 그대로 들어갔는지
+
+    def test_creating_blank_experience_without_title_rejected(self):
+        r = self.c.post('/experience/홍길동/new', data={'title': ''})
+        self.assertFalse(r.get_json()['success'])
+
+    def test_creating_blank_experience_twice_does_not_overwrite(self):
+        r1 = self.c.post('/experience/홍길동/new', data={'title': '학회 발표'})
+        r2 = self.c.post('/experience/홍길동/new', data={'title': '학회 발표'})
+        self.assertNotEqual(r1.get_json()['filename'], r2.get_json()['filename'])
+        exp_dir = self.root / 'users' / '홍길동' / 'experiences'
+        self.assertTrue((exp_dir / r1.get_json()['filename']).exists())
+        self.assertTrue((exp_dir / r2.get_json()['filename']).exists())
+
+
 class PathTraversalTest(WebTestBase):
     def test_dotdot_segments_rejected(self):
         for path in ['/output/../secret.md', '/output/홍길동/..', '/experience/../x',
@@ -201,6 +248,61 @@ class PathTraversalTest(WebTestBase):
         for sub in ('raw/apply', 'raw/logs', 'experiences'):
             self.assertTrue((self.root / 'users' / '김새이름' / sub).is_dir(), sub)
         self.assertTrue((self.root / 'outputs' / '김새이름').is_dir())
+
+    def test_delete_user_dotdot_rejected(self):
+        r = self.c.post('/delete-user/..')
+        self.assertEqual(r.status_code, 400)
+        self.assertTrue((self.root / 'users' / '홍길동').exists())
+
+
+class DeleteUserTest(WebTestBase):
+    """홈 화면 "사용자 삭제"(2026-09-27, 사용자 요청): 삭제 버튼 → 확인창 → 최종 삭제.
+    실제로는 rm 이 아니라 _trash/ 로 옮긴다(실수 클릭 대비 안전장치)."""
+
+    def test_deleting_user_removes_from_list_and_moves_to_trash(self):
+        r = self.c.post('/delete-user/홍길동')
+        self.assertTrue(r.get_json()['success'])
+        self.assertFalse((self.root / 'users' / '홍길동').exists())
+        self.assertFalse((self.root / 'outputs' / '홍길동').exists())
+        # 실제로 지워진 게 아니라 _trash/ 아래로 옮겨져 있어야 한다 (복구 가능)
+        trashed = list((self.root / '_trash').glob('홍길동__*'))
+        self.assertEqual(len(trashed), 1)
+        self.assertTrue((trashed[0] / 'users' / 'experiences' / 'a.md').exists())
+        self.assertTrue((trashed[0] / 'outputs' / 'x.md').exists())
+        # 홈 화면 목록에서도 사라져야 한다
+        idx = self.c.get('/').data.decode('utf-8')
+        self.assertNotIn('홍길동', idx)
+
+    def test_deleting_nonexistent_user_returns_error(self):
+        r = self.c.post('/delete-user/없는사람')
+        self.assertEqual(r.status_code, 404)
+        self.assertFalse(r.get_json()['success'])
+
+    def test_deleting_user_clears_related_db_rows(self):
+        db.init_db(self.tmp / 'app.db')
+        conn = db.get_conn(self.tmp / 'app.db')
+        conn.execute("INSERT INTO jobs (source, company, position) VALUES ('paste', 'A사', '백엔드')")
+        job_id = conn.execute('SELECT id FROM jobs').fetchone()['id']
+        conn.execute("INSERT INTO matches (user, job_id, score) VALUES ('홍길동', ?, 80)", (job_id,))
+        conn.execute("INSERT INTO applications (user, job_id, status) VALUES ('홍길동', ?, '관심')", (job_id,))
+        conn.commit()
+        app_id = conn.execute('SELECT id FROM applications').fetchone()['id']
+        conn.execute("INSERT INTO application_events (application_id, to_status) VALUES (?, '관심')", (app_id,))
+        conn.commit()
+        conn.close()
+
+        r = self.c.post('/delete-user/홍길동')
+        self.assertTrue(r.get_json()['success'])
+
+        conn = db.get_conn(self.tmp / 'app.db')
+        try:
+            self.assertEqual(conn.execute("SELECT COUNT(*) c FROM matches WHERE user='홍길동'").fetchone()['c'], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) c FROM applications WHERE user='홍길동'").fetchone()['c'], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) c FROM application_events").fetchone()['c'], 0)
+            # 공용 데이터인 jobs 는 남아있어야 한다(사용자 개인 데이터가 아니므로)
+            self.assertEqual(conn.execute('SELECT COUNT(*) c FROM jobs').fetchone()['c'], 1)
+        finally:
+            conn.close()
 
 
 class UploadTest(WebTestBase):

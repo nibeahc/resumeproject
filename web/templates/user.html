@@ -21,6 +21,7 @@
                     padding:10px 16px; margin-bottom:16px; font-size:13px; color:var(--accent); }
   .back-link { color:var(--ink-soft); font-size:13px; }
   .muted { color:var(--ink-soft); }
+  .row-link { cursor:pointer; }
   .faint { color:var(--ink-faint); }
 </style>
 
@@ -82,33 +83,47 @@
   </div>
 </div>
 
-<div class="tabs">
-  <div class="tab active" data-tab="experiences">경험 DB ({{ experiences|length }})</div>
-  <div class="tab" data-tab="outputs">자소서 결과물 ({{ outputs|length }})</div>
-  <div class="tab" data-tab="upload">파일 업로드</div>
+<div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; margin-bottom:20px;">
+  <div class="tabs" style="margin-bottom:0;">
+    <div class="tab active" data-tab="experiences">경험 DB ({{ experiences|length }})</div>
+    <div class="tab" data-tab="outputs">자소서 결과물 ({{ outputs|length }})</div>
+    <div class="tab" data-tab="upload">파일 업로드</div>
+  </div>
+  <!-- 경험이 이미 있어도 하나 더 추가하고 싶을 수 있다 — 예전엔 이 링크가 경험이 0개일 때만
+       보여서, 경험이 하나라도 있으면 /elicit 로 갈 방법이 화면에서 사라졌다. 사용자 요청으로
+       탭 바와 같은 줄에 둔다(경험 DB 탭일 때만 보임, showTab() 이 함께 토글) -->
+  <div id="expActions" style="display:flex; gap:8px; flex-wrap:wrap;">
+    <button type="button" class="btn btn-secondary btn-sm" onclick="showNewExperience()">+ 빈 템플릿으로 추가</button>
+    <button type="button" class="btn btn-secondary btn-sm" onclick="showTab('upload')">파일 업로드에서 추가</button>
+    <a href="/elicit/{{ user }}" class="btn btn-primary btn-sm">대화로 경험 추가 →</a>
+  </div>
 </div>
 
 <!-- 경험 DB -->
 <div id="tab-experiences">
   {% if experiences %}
-  <!-- 경험이 이미 있어도 하나 더 추가하고 싶을 수 있다 — 예전엔 이 링크가 경험이 0개일 때만
-       보여서, 경험이 하나라도 있으면 /elicit 로 갈 방법이 화면에서 사라졌다 -->
-  <div style="display:flex; justify-content:flex-end; gap:8px; margin-bottom:10px;">
-    <button type="button" class="btn btn-secondary btn-sm" onclick="showTab('upload')">파일 업로드에서 추가</button>
-    <a href="/elicit/{{ user }}" class="btn btn-primary btn-sm">대화로 경험 추가 →</a>
-  </div>
-  <div class="card" style="padding:0; overflow:hidden;">
+  <div class="card" style="padding:0; overflow-x:auto;">
+    <!-- table-layout:fixed 를 쓰면 시기/버튼 칸을 고정폭으로 뺀 나머지를 전부 활동명이
+         가져가서 시기가 오른쪽 끝에 붙어버렸다(사용자 지적) — auto 레이아웃으로 바꿔
+         내용 너비에 맞게 자연스럽게 분배되게 하고, width 는 최소 힌트로만 준다. 줄바꿈은
+         허용하되(word-break: keep-all) 단어 중간이 잘리지 않게 한다(overflow-wrap 은
+         정말 어쩔 수 없을 때만의 최후 수단). -->
     <table>
-      <thead><tr><th>활동명</th><th>시기</th><th></th></tr></thead>
+      <thead><tr><th>활동명</th><th style="width:220px;">시기</th><th></th></tr></thead>
       <tbody>
         {% for e in experiences %}
-        <tr>
-          <td>
+        <!-- 사용자 요청: "수정 버튼도 그냥 없애버리고 칸 클릭하면 상세페이지 들어가게" —
+             행 전체를 클릭하면 상세 페이지로 이동한다(삭제 버튼만 클릭 전파를 막는다). -->
+        <tr class="row-link" onclick="location.href='/experience/{{ user }}/{{ e.filename }}'">
+          <td style="word-break:keep-all; overflow-wrap:break-word;">
             {% if e.warn %}<span class="warn-icon">⚠️</span> {% endif %}
             <a href="/experience/{{ user }}/{{ e.filename }}">{{ e.name }}</a>
           </td>
-          <td class="muted mono" style="white-space:nowrap;">{{ e.date }}</td>
-          <td><a href="/experience/{{ user }}/{{ e.filename }}" class="btn btn-secondary btn-sm">열기</a></td>
+          <td class="muted mono" style="word-break:keep-all; overflow-wrap:break-word;">{{ e.date }}</td>
+          <td style="text-align:right; white-space:nowrap;">
+            <button type="button" class="btn btn-secondary btn-sm" style="color:var(--st-bad);"
+                    onclick="event.stopPropagation(); showDeleteExperience('{{ e.filename|e }}', '{{ e.name|e }}')">삭제</button>
+          </td>
         </tr>
         {% endfor %}
       </tbody>
@@ -235,6 +250,43 @@
     {% endif %}
   </div>
 </div>
+
+<!-- 빈 템플릿으로 경험 추가(2026-09-27, 사용자 요청: "파일 업로드나 대화 없이도 추가 가능
+     하게, 템플릿만 포함된 백지로"). 활동명만 물어보고, 나머지는 편집 화면에서 직접 채운다. -->
+<div id="newExpModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,.4);
+     z-index:50; align-items:center; justify-content:center;">
+  <div class="card" style="width:340px; margin-bottom:0;">
+    <h2 style="margin-bottom:10px;">빈 템플릿으로 경험 추가</h2>
+    <p class="muted" style="font-size:13px; margin-bottom:16px;">
+      활동명만 입력하면 빈 템플릿 파일을 만들어 편집 화면으로 이동합니다. 나머지 항목은
+      직접 채우면 됩니다.
+    </p>
+    <input id="newExpTitle" type="text" placeholder="활동명 (예: 학회 발표)"
+           style="width:100%; padding:10px 12px; border:1px solid var(--rule); border-radius:8px;
+                  font-size:14px; margin-bottom:16px; background:var(--surface); color:var(--ink);">
+    <div style="display:flex; gap:8px; justify-content:flex-end;">
+      <button class="btn btn-secondary" onclick="closeNewExperience()">취소</button>
+      <button class="btn btn-primary" id="createExpBtn" onclick="createExperience()">추가</button>
+    </div>
+  </div>
+</div>
+
+<!-- 경험 삭제 확인. 사용자 삭제와 같은 패턴(확인 한 번, 서버는 _trash/ 로 이동) -->
+<div id="deleteExpModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,.4);
+     z-index:50; align-items:center; justify-content:center;">
+  <div class="card" style="width:340px; margin-bottom:0;">
+    <h2 style="margin-bottom:10px;">경험 삭제</h2>
+    <p style="font-size:13px; margin-bottom:20px;" class="muted">
+      <strong id="deleteExpName" style="color:var(--ink);"></strong> 경험을 정말 삭제하시겠습니까?
+      이 작업은 되돌릴 수 없습니다.
+    </p>
+    <div style="display:flex; gap:8px; justify-content:flex-end;">
+      <button class="btn btn-secondary" onclick="closeDeleteExperience()">취소</button>
+      <button class="btn btn-primary" style="background:var(--st-bad); border-color:var(--st-bad);"
+              id="confirmDeleteExpBtn" onclick="confirmDeleteExperience()">삭제</button>
+    </div>
+  </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -245,10 +297,76 @@ function showTab(name) {
   ['experiences','outputs','upload'].forEach(id => {
     document.getElementById('tab-'+id).style.display = id === name ? '' : 'none';
   });
+  // 고도화(2026-09-27, 사용자 요청): "파일 업로드에서 추가"/"대화로 경험 추가" 버튼을
+  // 탭 바와 같은 줄로 올렸다 — 경험 DB 탭일 때만 보이게 유지한다.
+  document.getElementById('expActions').style.display = name === 'experiences' ? '' : 'none';
 }
 document.querySelectorAll('.tab').forEach(tab => {
   tab.addEventListener('click', () => showTab(tab.dataset.tab));
 });
+
+// 빈 템플릿으로 경험 추가
+function showNewExperience() {
+  document.getElementById('newExpModal').style.display = 'flex';
+  document.getElementById('newExpTitle').focus();
+}
+function closeNewExperience() {
+  document.getElementById('newExpModal').style.display = 'none';
+  document.getElementById('newExpTitle').value = '';
+}
+async function createExperience() {
+  const title = document.getElementById('newExpTitle').value.trim();
+  if (!title) return;
+  const btn = document.getElementById('createExpBtn');
+  btn.disabled = true;
+  try {
+    const fd = new FormData(); fd.append('title', title);
+    const res = await fetch('/experience/{{ user }}/new', {method:'POST', body:fd}).then(r=>r.json());
+    if (res.success) {
+      window.location = `/experience/{{ user }}/${encodeURIComponent(res.filename)}`;
+    } else {
+      toast(res.error || '추가 실패');
+      btn.disabled = false;
+    }
+  } catch (e) {
+    toast('추가 중 오류: ' + e.message);
+    btn.disabled = false;
+  }
+}
+document.getElementById('newExpTitle').addEventListener('keydown', e => {
+  if (e.key === 'Enter') createExperience();
+  if (e.key === 'Escape') closeNewExperience();
+});
+
+// 경험 삭제
+let deleteExpFilename = null;
+function showDeleteExperience(filename, name) {
+  deleteExpFilename = filename;
+  document.getElementById('deleteExpName').textContent = name;
+  document.getElementById('deleteExpModal').style.display = 'flex';
+}
+function closeDeleteExperience() {
+  document.getElementById('deleteExpModal').style.display = 'none';
+  deleteExpFilename = null;
+}
+async function confirmDeleteExperience() {
+  if (!deleteExpFilename) return;
+  const btn = document.getElementById('confirmDeleteExpBtn');
+  btn.disabled = true;
+  try {
+    const res = await fetch(`/experience/{{ user }}/${encodeURIComponent(deleteExpFilename)}/delete`, {method:'POST'}).then(r=>r.json());
+    if (res.success) {
+      closeDeleteExperience();
+      window.location.reload();
+    } else {
+      toast(res.error || '삭제 실패');
+      btn.disabled = false;
+    }
+  } catch (e) {
+    toast('삭제 중 오류: ' + e.message);
+    btn.disabled = false;
+  }
+}
 
 // upload
 function onDragOver(e) {

@@ -10,13 +10,15 @@
 {% if users %}
 <div class="card" style="padding:0; overflow:hidden;">
   <table>
-    <thead><tr><th>이름</th><th>바로가기</th></tr></thead>
+    <thead><tr><th>이름</th><th></th></tr></thead>
     <tbody>
       {% for u in users %}
       <tr>
         <td style="font-weight:500">{{ u }}</td>
-        <td>
+        <td style="text-align:right;">
           <a href="/user/{{ u }}" class="btn btn-secondary btn-sm">대시보드</a>
+          <button type="button" class="btn btn-secondary btn-sm" style="color:var(--st-bad);"
+                  onclick="showDeleteUser('{{ u|e }}')">삭제</button>
         </td>
       </tr>
       {% endfor %}
@@ -29,17 +31,39 @@
 </div>
 {% endif %}
 
-<!-- New user modal -->
+<!-- 새 사용자 -->
 <div id="modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,.4);
      z-index:50; align-items:center; justify-content:center;">
-  <div style="background:#fff; border-radius:14px; padding:28px; width:320px;">
+  <div class="card" style="width:320px; margin-bottom:0;">
     <h2 style="margin-bottom:16px;">새 사용자 추가</h2>
     <input id="newName" type="text" placeholder="이름 (예: 채빈)"
-           style="width:100%; padding:10px 12px; border:1px solid #d2d2d7; border-radius:8px;
-                  font-size:14px; margin-bottom:16px;">
+           style="width:100%; padding:10px 12px; border:1px solid var(--rule); border-radius:8px;
+                  font-size:14px; margin-bottom:16px; background:var(--surface); color:var(--ink);">
     <div style="display:flex; gap:8px; justify-content:flex-end;">
       <button class="btn btn-secondary" onclick="closeModal()">취소</button>
       <button class="btn btn-primary" onclick="createUser()">추가</button>
+    </div>
+  </div>
+</div>
+
+<!-- 고도화(2026-09-27, 사용자 요청): "삭제 누르면 진짜 삭제하시겠습니까 창 나오고 최종
+     삭제 버튼 누르면 User 의 모든 내용 삭제" — 실수 클릭 방지용 확인창 하나만 두고,
+     이름을 다시 입력하게 하는 식으로 번거롭게 만들지 않았다(사용자가 그 정도 마찰은
+     원하지 않는다고 명시). 대신 서버 쪽에서 즉시 rm 하지 않고 _trash/ 로 옮겨서,
+     화면상으로는 "삭제됨"과 똑같아 보이면서도 실수를 되돌릴 여지는 남겨뒀다. -->
+<div id="deleteModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,.4);
+     z-index:50; align-items:center; justify-content:center;">
+  <div class="card" style="width:340px; margin-bottom:0;">
+    <h2 style="margin-bottom:10px;">사용자 삭제</h2>
+    <p style="font-size:13px; color:var(--ink-soft); margin-bottom:20px;">
+      <strong id="deleteTargetName" style="color:var(--ink);"></strong>님을 정말 삭제하시겠습니까?
+      경험 DB, 업로드 원본, 생성된 자소서 등 모든 데이터가 목록에서 사라집니다.
+      이 작업은 되돌릴 수 없습니다.
+    </p>
+    <div style="display:flex; gap:8px; justify-content:flex-end;">
+      <button class="btn btn-secondary" onclick="closeDeleteModal()">취소</button>
+      <button class="btn btn-primary" style="background:var(--st-bad); border-color:var(--st-bad);"
+              id="confirmDeleteBtn" onclick="confirmDeleteUser()">삭제</button>
     </div>
   </div>
 </div>
@@ -66,5 +90,34 @@ document.getElementById('newName').addEventListener('keydown', e => {
   if (e.key === 'Enter') createUser();
   if (e.key === 'Escape') closeModal();
 });
+
+let deleteTarget = null;
+function showDeleteUser(name) {
+  deleteTarget = name;
+  document.getElementById('deleteTargetName').textContent = name;
+  document.getElementById('deleteModal').style.display = 'flex';
+}
+function closeDeleteModal() {
+  document.getElementById('deleteModal').style.display = 'none';
+  deleteTarget = null;
+}
+async function confirmDeleteUser() {
+  if (!deleteTarget) return;
+  const btn = document.getElementById('confirmDeleteBtn');
+  btn.disabled = true;
+  try {
+    const res = await fetch(`/delete-user/${encodeURIComponent(deleteTarget)}`, {method:'POST'}).then(r=>r.json());
+    if (res.success) {
+      closeDeleteModal();
+      window.location.reload();
+    } else {
+      toast(res.error || '삭제 실패');
+      btn.disabled = false;
+    }
+  } catch (e) {
+    toast('삭제 중 오류: ' + e.message);
+    btn.disabled = false;
+  }
+}
 </script>
 {% endblock %}

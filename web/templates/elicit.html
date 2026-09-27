@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}경험 발굴 — {{ user }}{% endblock %}
+{% block title %}{{ '경험 보강' if edit_filename else '경험 발굴' }} — {{ user }}{% endblock %}
 
 {% block content %}
 <style>
@@ -10,31 +10,59 @@
 
   #chatBox { height:460px; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:10px; }
   .bubble { max-width:80%; padding:10px 14px; border-radius:14px; font-size:14px; line-height:1.6; white-space:pre-wrap; }
-  .bubble.assistant { background:#f0f0f5; align-self:flex-start; border-bottom-left-radius:4px; }
-  .bubble.user { background:#0066cc; color:#fff; align-self:flex-end; border-bottom-right-radius:4px; }
-  .bubble.pending { color:#6e6e73; font-style:italic; }
+  .bubble.assistant { background:var(--surface-sunk); align-self:flex-start; border-bottom-left-radius:4px; }
+  .bubble.user { background:var(--accent); color:var(--surface); align-self:flex-end; border-bottom-right-radius:4px; }
+  .bubble.pending { color:var(--ink-soft); font-style:italic; }
 
-  #chatForm { display:flex; gap:8px; padding:12px; border-top:1px solid #d2d2d7; }
-  #chatInput { flex:1; padding:9px 12px; border:1px solid #d2d2d7; border-radius:8px; font-size:14px; font-family:inherit; resize:none; }
-  #chatInput:focus { outline:none; border-color:#0066cc; }
+  #chatForm { display:flex; gap:8px; padding:12px; border-top:1px solid var(--rule); }
+  #chatInput { flex:1; padding:9px 12px; border:1px solid var(--rule); border-radius:8px; font-size:14px;
+               font-family:inherit; resize:none; background:var(--surface); color:var(--ink); }
+  #chatInput:focus { outline:none; border-color:var(--accent); }
 
-  .exp-card { padding:10px 12px; border:1px solid #d2d2d7; border-radius:10px; margin-bottom:10px; font-size:13px; }
+  .exp-card { padding:10px 12px; border:1px solid var(--rule); border-radius:10px; margin-bottom:10px; font-size:13px; }
   .exp-card .title { font-weight:500; margin-bottom:4px; }
-  .exp-empty { color:#6e6e73; font-size:12px; padding:8px 0; }
+  .exp-empty { color:var(--ink-faint); font-size:12px; padding:8px 0; }
+
+  /* 고도화(2026-09-27, 사용자 요청): 대화창 위에 원본/초안 본문을 토글로 접었다 폈다
+     할 수 있게. 본문을 보면서 대화하고, 대화 중 갱신되는 초안이 여기 실시간으로 반영된다. */
+  #previewBody { padding:20px; font-size:14px; max-height:420px; overflow-y:auto; }
+  #previewBody h1, #previewBody h2, #previewBody h3 { margin-top:16px; margin-bottom:8px; }
+  #previewBody h1:first-child, #previewBody h2:first-child { margin-top:0; }
+  #previewBody p { margin-bottom:8px; line-height:1.8; }
+  #previewBody ul, #previewBody ol { margin:0 0 8px 22px; line-height:1.8; }
 </style>
 
-<div style="margin-bottom:20px; font-size:13px; color:#6e6e73;">
+<div style="margin-bottom:20px; font-size:13px;" class="muted">
   <a href="/">홈</a>
   <span style="margin:0 6px;">›</span>
   <a href="/user/{{ user }}">{{ user }}</a>
   <span style="margin:0 6px;">›</span>
-  경험 발굴
+  {{ '경험 보강' if edit_filename else '경험 발굴' }}
 </div>
 
-<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:16px;">
-  <h1 style="margin:0">대화로 경험 만들기</h1>
+<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:16px; flex-wrap:wrap; gap:8px;">
+  <h1 style="margin:0">{{ '경험 보강하기: ' + edit_title if edit_filename else '대화로 경험 만들기' }}</h1>
   <a href="/user/{{ user }}" class="btn btn-secondary">마치기</a>
 </div>
+{% if edit_filename %}
+<p class="muted" style="font-size:13px; margin-top:-8px; margin-bottom:16px;">
+  기존 경험(<span class="mono">{{ edit_filename }}</span>)에서 ⚠️ 표시된 부분을 대화로 채웁니다.
+  대화 중 갱신되는 초안은 아래 미리보기에 바로 반영되고, "저장"을 눌러야 실제 파일에 반영됩니다.
+</p>
+
+<!-- 보강 모드 전용: 본문 미리보기(토글) + 저장 버튼 -->
+<div class="card" id="previewCard" style="padding:0; overflow:hidden; margin-bottom:16px;">
+  <div style="display:flex; align-items:center; justify-content:space-between;
+              padding:12px 16px; border-bottom:1px solid var(--rule); background:var(--surface-sunk);">
+    <button type="button" class="btn btn-secondary btn-sm" id="previewToggleBtn" onclick="togglePreview()">본문 접기</button>
+    <div style="display:flex; align-items:center; gap:10px;">
+      <span id="draftStatus" class="muted" style="font-size:12px;"></span>
+      <button type="button" class="btn btn-primary btn-sm" id="saveDraftBtn" onclick="saveDraft()">저장</button>
+    </div>
+  </div>
+  <div id="previewBody"></div>
+</div>
+{% endif %}
 
 <div class="elicit-layout">
   <div class="chat-col">
@@ -47,21 +75,63 @@
     </div>
   </div>
 
+  {% if not edit_filename %}
   <div class="side-col">
     <div class="card">
-      <h2 style="margin-bottom:10px; font-size:14px;">확정된 경험</h2>
+      <h2 style="margin-bottom:10px;">확정된 경험</h2>
       <div id="savedList">
         <p class="exp-empty">아직 없습니다. 대화를 마치면 여기 쌓입니다.</p>
       </div>
     </div>
   </div>
+  {% endif %}
 </div>
 {% endblock %}
 
 {% block scripts %}
+<script src="/static/markdown.js"></script>
 <script>
 let history = [];      // 서버에 매 턴 그대로 보내는 대화 기록 ({role, content}[])
 let sending = false;
+const EDIT_FILENAME = {{ edit_filename|tojson }};  // null 이면 새 경험 만들기 모드
+let currentDraft = {{ edit_content|tojson }};       // 보강 모드: 현재 미리보기에 떠 있는 내용
+let draftDirty = false;                             // 대화로 갱신된 뒤 아직 저장 안 했으면 true
+
+if (EDIT_FILENAME) {
+  document.getElementById('previewBody').innerHTML = renderMarkdown(currentDraft || '');
+}
+
+function togglePreview() {
+  const body = document.getElementById('previewBody');
+  const btn = document.getElementById('previewToggleBtn');
+  const collapsed = body.style.display === 'none';
+  body.style.display = collapsed ? '' : 'none';
+  btn.textContent = collapsed ? '본문 접기' : '본문 펼치기';
+}
+
+async function saveDraft() {
+  if (!EDIT_FILENAME) return;
+  const btn = document.getElementById('saveDraftBtn');
+  btn.disabled = true;
+  try {
+    const res = await fetch(`/experience/{{ user }}/${encodeURIComponent(EDIT_FILENAME)}/save`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: currentDraft || '' }),
+    }).then(r => r.json());
+    if (res.success) {
+      draftDirty = false;
+      document.getElementById('draftStatus').textContent = '저장됨';
+      toast('저장 완료');
+    } else {
+      toast(res.error || '저장 실패');
+    }
+  } catch (e) {
+    toast('저장 중 오류: ' + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
 
 function addBubble(role, text) {
   const box = document.getElementById('chatBox');
@@ -84,7 +154,7 @@ async function callElicit(userMessage) {
   const res = await fetch('/elicit/{{ user }}', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messages: history, message: userMessage || '' }),
+    body: JSON.stringify({ messages: history, message: userMessage || '', edit_filename: EDIT_FILENAME }),
   });
   return res.json();
 }
@@ -111,6 +181,7 @@ async function send() {
     history = data.messages;
     addBubble('assistant', data.reply);
     if (data.saved) addSavedCard(data.saved);
+    if (data.draft) applyDraft(data.draft);
   } catch (e) {
     pending.remove();
     addBubble('assistant', '⚠️ 요청 중 오류: ' + e.message);
@@ -119,6 +190,17 @@ async function send() {
     document.getElementById('sendBtn').disabled = false;
     input.focus();
   }
+}
+
+// 보강 모드: 대화 중 모델이 정리한 최신 초안을 미리보기에 실시간 반영한다 (사용자 요청:
+// "수정한 건 실시간으로 반영돼서 저장을 누르면 저장되면 좋겠다"). 아직 파일엔 안 쓴다.
+function applyDraft(draft) {
+  currentDraft = draft.content;
+  draftDirty = true;
+  document.getElementById('previewBody').innerHTML = renderMarkdown(currentDraft || '');
+  document.getElementById('previewBody').style.display = '';
+  document.getElementById('previewToggleBtn').textContent = '본문 접기';
+  document.getElementById('draftStatus').textContent = '저장 안 됨 — 아래 "저장"을 눌러주세요';
 }
 
 function addSavedCard(saved) {
@@ -158,5 +240,9 @@ function escapeHtml(s) {
     addBubble('assistant', '⚠️ 시작 중 오류: ' + e.message);
   }
 })();
+
+window.addEventListener('beforeunload', (e) => {
+  if (draftDirty) { e.preventDefault(); e.returnValue = ''; }
+});
 </script>
 {% endblock %}
