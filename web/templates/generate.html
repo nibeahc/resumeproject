@@ -115,6 +115,16 @@
         </div>
       </div>
     </div>
+    <div style="margin-top:14px; padding-top:14px; border-top:1px solid #f0f0f5;">
+      <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:#1d1d1f; cursor:pointer;">
+        <input type="checkbox" id="useTrends" checked>
+        최신 자소서 작성 트렌드 반영
+      </label>
+      <p style="font-size:11px; color:#6e6e73; margin:4px 0 0 24px;">
+        references/trends/coverletter-trends.md 를 참고 자료로 함께 전달합니다 (writing-style.md/writing-rules.md 와
+        충돌하면 항상 그쪽이 우선합니다). 끄면 참고하지 않습니다.
+      </p>
+    </div>
   </div>
 
   <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:4px; margin-bottom:20px;">
@@ -275,6 +285,7 @@ async function generateBundle() {
   const question = document.getElementById('question').value.trim();
   const charLimit = document.getElementById('charLimit').value;
   const countMode = document.querySelector('input[name="countMode"]:checked').value;
+  const useTrends = document.getElementById('useTrends').checked;
   if (!jobId || !question || !charLimit) {
     toast('문항과 글자수를 입력해주세요.');
     return;
@@ -294,7 +305,7 @@ async function generateBundle() {
     const res = await fetch('/generate/{{ user }}/bundle', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ job_id: jobId, question, char_limit: charLimit, count_mode: countMode }),
+      body: JSON.stringify({ job_id: jobId, question, char_limit: charLimit, count_mode: countMode, use_trends: useTrends }),
     });
 
     let doneData = null, errorMsg = null;
@@ -355,6 +366,7 @@ async function generate(overrideFiles) {
   const question = document.getElementById('question').value.trim();
   const charLimit = document.getElementById('charLimit').value;
   const countMode = document.querySelector('input[name="countMode"]:checked').value;
+  const useTrends = document.getElementById('useTrends').checked;
 
   if (!company || !position || !question || !charLimit) {
     toast('모든 항목을 입력해주세요.');
@@ -373,7 +385,7 @@ async function generate(overrideFiles) {
   document.getElementById('progressTitle').textContent = overrideFiles ? '재생성 중...' : '생성 중...';
 
   try {
-    const body = { company, position, question, char_limit: charLimit, count_mode: countMode };
+    const body = { company, position, question, char_limit: charLimit, count_mode: countMode, use_trends: useTrends };
     if (overrideFiles && overrideFiles.length) body.experience_files = overrideFiles;
 
     const res = await fetch('/generate/{{ user }}', {

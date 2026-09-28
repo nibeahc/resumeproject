@@ -287,6 +287,31 @@ class GenerateRouteTest(unittest.TestCase):
         prompt = m.call_args.kwargs['messages'][0]['content']
         self.assertIn('아직 조사된 트렌드 없음', prompt)
 
+    def test_use_trends_false_excludes_trends_from_prompt(self):
+        """고도화(2026-09-28): 대시보드 '최신 트렌드 반영' 토글을 끄면 트렌드 문서를 아예 안 보낸다."""
+        trends_dir = self.root / 'references' / 'trends'
+        trends_dir.mkdir(parents=True)
+        (trends_dir / 'coverletter-trends.md').write_text(
+            '# 자소서 작성 트렌드\n\n## 구조\n두괄식 선호', encoding='utf-8')
+        fake = llm_result('===ANSWER===\n답변\n===END===\n===META===\n참조한 경험: x\n===END===\n')
+        with patch.object(generate_route, 'stream_complete', return_value=fake) as m:
+            self.post(use_trends=False).get_data()
+        prompt = m.call_args.kwargs['messages'][0]['content']
+        self.assertNotIn('두괄식 선호', prompt)
+        self.assertIn('아직 조사된 트렌드 없음', prompt)
+
+    def test_use_trends_defaults_true_when_omitted(self):
+        """토글 값을 아예 안 보내는 기존 호출(폼 없이)도 트렌드 반영 기본값(True)을 유지해야 한다."""
+        trends_dir = self.root / 'references' / 'trends'
+        trends_dir.mkdir(parents=True)
+        (trends_dir / 'coverletter-trends.md').write_text(
+            '# 자소서 작성 트렌드\n\n## 구조\n두괄식 선호', encoding='utf-8')
+        fake = llm_result('===ANSWER===\n답변\n===END===\n===META===\n참조한 경험: x\n===END===\n')
+        with patch.object(generate_route, 'stream_complete', return_value=fake) as m:
+            self.post().get_data()
+        prompt = m.call_args.kwargs['messages'][0]['content']
+        self.assertIn('두괄식 선호', prompt)
+
     def test_selected_event_reports_question_type_and_reasons(self):
         fake = llm_result('===ANSWER===\n답변\n===END===\n===META===\n참조한 경험: x\n===END===\n')
         with patch.object(generate_route, 'stream_complete', return_value=fake):

@@ -198,11 +198,20 @@ def sse(event, data):
     return f'event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n'
 
 
+def _parse_use_trends(data):
+    """폼(문자열 'true'/'false'/'on')과 JSON(bool) 양쪽에서 와도 되게 관대하게 받는다.
+    안 보내면 기본값은 True(트렌드 반영) — 기존 동작(항상 반영)과 호환된다."""
+    raw = data.get('use_trends', True)
+    if isinstance(raw, str):
+        return raw.strip().lower() not in ('false', '0', '')
+    return bool(raw)
+
+
 def _validate_generate_params(data):
     """company/position/question/char_limit 검증. (errors, company, position, question,
-    char_limit, count_mode, override_files) 를 돌려준다 — SSE 제너레이터가 시작되기 *전에*
-    동기적으로 끝내야 한다 (S1-3 에서 겪은, 제너레이터 안에서 abort/에러 내면 이미 200이
-    나간 뒤라 늦다는 패턴을 여기서도 피한다)."""
+    char_limit, count_mode, override_files, use_trends) 를 돌려준다 — SSE 제너레이터가
+    시작되기 *전에* 동기적으로 끝내야 한다 (S1-3 에서 겪은, 제너레이터 안에서 abort/에러 내면
+    이미 200이 나간 뒤라 늦다는 패턴을 여기서도 피한다)."""
     company = (data.get('company') or '').strip()
     position = (data.get('position') or '').strip()
     question = (data.get('question') or '').strip()
@@ -233,11 +242,13 @@ def _validate_generate_params(data):
     if isinstance(override_files, str):
         override_files = [f.strip() for f in override_files.split(',') if f.strip()]
 
-    return errors, company, position, question, char_limit, count_mode, override_files
+    use_trends = _parse_use_trends(data)
+
+    return errors, company, position, question, char_limit, count_mode, override_files, use_trends
 
 
 def coverletter_events(name, root, company, position, question, char_limit, count_mode,
-                        override_files=None, folder_name=None):
+                        override_files=None, folder_name=None, use_trends=True):
     """자소서 한 문항을 생성해 저장하고, (event, data) 튜플을 yield 하는 순수 제너레이터.
 
     /generate/<name> (단독 생성)과 /generate/<name>/bundle (S7-3 공고 연동 일괄 생성) 양쪽에서
@@ -261,7 +272,9 @@ def coverletter_events(name, root, company, position, question, char_limit, coun
     rules_text = read_if_exists(root / 'writing-rules.md')
     interest_text = read_if_exists(root / '관심직무.md')
     company_text = read_if_exists(project_root() / 'companies' / f'{company}.md')
-    trends_text = trends.load_trends(trends_path()) or ''
+    # use_trends=False 면 아예 빈 문자열로 넘긴다 — build_prompt 는 빈 값일 때 이미
+    # "(아직 조사된 트렌드 없음 — 무시)" 로 처리하므로 별도 분기 없이 그대로 재사용한다.
+    trends_text = (trends.load_trends(trends_path()) or '') if use_trends else ''
 
     ref_dir = project_root() / 'references' / 'coverletter' / position
     reference_texts = []
@@ -393,7 +406,8 @@ def coverletter_events(name, root, company, position, question, char_limit, coun
 def generate(name):
     root = user_dir(name)
     data = request.get_json(silent=True) or request.form
-    errors, company, position, question, char_limit, count_mode, override_files = _validate_generate_params(data)
+    errors, company, position, question, char_limit, count_mode, override_files, use_trends = \
+        _validate_generate_params(data)
 
     if errors:
         def bad():
@@ -402,7 +416,8 @@ def generate(name):
 
     def stream():
         for event, ev_data in coverletter_events(name, root, company, position, question,
-                                                  char_limit, count_mode, override_files):
+                                                  char_limit, count_mode, override_files,
+                                                  use_trends=use_trends):
             yield sse(event, ev_data)
 
     return Response(stream_with_context(stream()), mimetype='text/event-stream')
@@ -423,7 +438,7 @@ def generate_bundle(name):
     if not job_id_raw.isdigit():
         return jsonify(success=False, error='공고를 선택해주세요.'), 400
 
-    errors, _, _, question, char_limit, count_mode, override_files = _validate_generate_params(
+    errors, _, _, question, char_limit, count_mode, override_files, use_trends = _validate_generate_params(
         {**data, 'company': 'x', 'position': 'x'})  # company/position 은 공고에서 가져오므로 폼 값 검증은 건너뜀
     errors = [e for e in errors if '기업명' not in e and '직무명' not in e]
     if errors:
@@ -475,7 +490,8 @@ def generate_bundle(name):
 
         coverletter_ok, coverletter_error, coverletter_path = False, None, None
         for event, ev_data in coverletter_events(name, root, company, position, question, char_limit,
-                                                  count_mode, override_files, folder_name=folder_name):
+                                                  count_mode, override_files, folder_name=folder_name,
+                                                  use_trends=use_trends):
             tagged = dict(ev_data)
             tagged['doc'] = 'coverletter'
             if event == 'done':
