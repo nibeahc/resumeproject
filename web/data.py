@@ -10,6 +10,20 @@ def get_users():
     return sorted([p.name for p in d.iterdir() if p.is_dir()]) if d.exists() else []
 
 
+_DATE_PREFIX = re.compile(r'(\d{4})(?:\.(\d{1,2}))?(?:\.(\d{1,2}))?')
+
+
+def _start_date_key(date_text):
+    """'- 시기: ...' 값에서 시작 시기를 뽑아 정렬 키로 쓴다. skills/query-experiences.md 의
+    '시기순(오래된 순)' 타임라인 규칙과 같은 기준(연도 → 월 → 일, 없으면 가장 이른 것으로 간주)
+    을 대시보드 목록에도 맞춘다. 파싱 자체가 안 되면(형식이 특이한 경우) 맨 뒤로 보낸다."""
+    m = _DATE_PREFIX.search(date_text)
+    if not m:
+        return (9999, 0, 0)
+    year, month, day = m.groups()
+    return (int(year), int(month or 1), int(day or 1))
+
+
 def get_experiences(user):
     d = user_dir(user) / 'experiences'
     if not d.exists():
@@ -21,6 +35,7 @@ def get_experiences(user):
         date  = (re.search(r'- 시기: (.+)', text) or [None, '-'])[1]
         warn  = '⚠️' if '⚠️ 오래된 경험' in text or '⚠️ STAR 보강' in text else ''
         result.append({'name': title, 'date': date, 'filename': f.name, 'warn': warn})
+    result.sort(key=lambda e: _start_date_key(e['date']))
     return result
 
 
