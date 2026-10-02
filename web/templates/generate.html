@@ -348,7 +348,7 @@ async function generateBundle() {
     ];
     list.innerHTML = rows.map(([label, ok, path]) => {
       if (!ok) return `<div>⚠️ ${label}: 실패${doneData.coverletter_error && label === '자소서' ? ' — ' + escapeHtml(doneData.coverletter_error) : ''}</div>`;
-      const url = `/output/{{ user }}/${encodeURIComponent(path)}`;
+      const url = outputUrl(path);
       return `<div>✅ ${label}: <a href="${url}">${escapeHtml(path)}</a></div>`;
     }).join('');
     document.getElementById('bundleResultBox').style.display = '';
@@ -436,6 +436,31 @@ async function generate(overrideFiles) {
   }
 }
 
+// /output/<user>/<path:filename> 라우트는 하위폴더를 받는다. 경로 전체를
+// encodeURIComponent 에 넣으면 슬래시까지 %2F 로 바뀌어 한 조각이 되므로 조각별로 인코딩한다.
+function outputUrl(relPath) {
+  const parts = String(relPath || '').split('/').filter(Boolean).map(encodeURIComponent);
+  return `/output/{{ user }}/` + parts.join('/');
+}
+
+const ISSUE_LABELS = {
+  over_limit: '글자수 제한 초과',
+  undershoot: '목표 글자수보다 많이 모자람',
+  unresearched_company: '기업 정보를 조사하지 않고 작성함',
+  dropped_overrides: '지정한 경험 중 일부가 상한(2개)을 넘어 제외됨',
+  cited_unknown_experience: '제공되지 않은 경험을 인용함',
+};
+
+function issueLabel(code, data) {
+  if (code === 'over_limit' && data) {
+    return `글자수 제한 초과 (재시도 ${data.retries}회 후에도 ${data.chars - data.limit}자 초과)`;
+  }
+  if (code === 'undershoot' && data) {
+    return `목표 글자수보다 ${data.limit - data.chars}자 모자람`;
+  }
+  return ISSUE_LABELS[code] || code;
+}
+
 function showResult(question, data) {
   document.getElementById('resultQuestion').textContent = question;
   document.getElementById('answerText').textContent = data.answer;
@@ -445,17 +470,21 @@ function showResult(question, data) {
   badge.textContent = `${data.chars}자 / 목표 ${data.limit}자`;
   badge.className = 'char-badge ' + (data.exceeded ? 'char-over' : 'char-ok');
 
+  // S11-4: 글자수 초과만이 아니라 "사람이 봐야 하는 사유" 전부를 보여준다.
+  // status 가 review_required 면 저장은 됐지만 그대로 제출하면 안 된다는 뜻이다.
   const warnCard = document.getElementById('warnCard');
-  if (data.exceeded) {
+  const issues = data.issues || [];
+  if (data.status === 'review_required' && issues.length) {
     warnCard.style.display = '';
     document.getElementById('warnText').textContent =
-      `⚠️ 글자수 제한을 초과했습니다 (재시도 ${data.retries}회 후에도 ${data.chars - data.limit}자 초과). 내용을 직접 다듬어주세요.`;
+      '⚠️ 확인이 필요합니다 — ' + issues.map(code => issueLabel(code, data)).join(' / ');
   } else {
     warnCard.style.display = 'none';
   }
 
-  const filename = data.saved_to.split('/').pop();
-  document.getElementById('savedLink').href = `/output/{{ user }}/${encodeURIComponent(filename)}`;
+  // S11-5: 예전엔 saved_to 에서 파일명만 떼어내 서브폴더(기업_직무/)를 잃어버렸다.
+  // rel_path 는 /output/<user>/<path:filename> 에 그대로 붙일 수 있는 형태다.
+  document.getElementById('savedLink').href = outputUrl(data.rel_path || data.saved_to);
 
   document.getElementById('resultBox').style.display = '';
 }

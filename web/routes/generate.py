@@ -55,6 +55,15 @@ _META_BLOCK = re.compile(r'===META===\n(?P<body>.*?)\n===END===', re.S)
 
 MAX_RETRIES = 1  # ROADMAP: 초과 시 재시도 1회
 
+# S11-4: "저장했다" 와 "제출해도 된다" 를 분리한다. 이 둘을 같은 값으로 묶어두면
+# (예전의 done → coverletter_ok=True) 글자수를 초과한 초안도 성공으로 보고된다.
+# 저장은 그대로 한다 — 사람이 손봐서 쓸 수 있으니 버리지 않는다. 다만 ready 로 올리지 않는다.
+STATUS_READY = 'ready_for_user'          # 자동 검사를 통과했다. 사용자 최종 승인이나 제출과는 다른 뜻이다
+STATUS_REVIEW_REQUIRED = 'review_required'  # 저장은 됐지만 사람이 봐야 한다
+
+ISSUE_OVER_LIMIT = 'over_limit'
+ISSUE_UNDERSHOOT = 'undershoot'
+
 
 def count_chars(text, count_mode):
     return len(text) if count_mode == '포함' else len(re.sub(r'\s', '', text))
@@ -262,6 +271,8 @@ def coverletter_events(name, root, company, position, question, char_limit, coun
     root 는 이미 검증된 user_dir(name) 이다 — 이 함수 자체는 name 으로 다시 경로를 만들지 않는다
     (제너레이터 시작 전에 이미 끝났어야 할 검증을 여기서 반복하지 않기 위해).
     """
+    issues = []  # S11-4: 저장은 하되 ready 로 올리면 안 되는 사유를 모은다
+
     exp_dir = root / 'experiences'
     if not (exp_dir.exists() and any(exp_dir.glob('*.md'))):
         yield 'error', {'message': '경험 파일이 없습니다. 먼저 파싱을 진행하세요.'}
@@ -367,6 +378,13 @@ def coverletter_events(name, root, company, position, question, char_limit, coun
         yield 'error', {'message': 'LLM 출력에서 ANSWER 블록을 찾지 못했습니다.', 'raw': result['text'][:500]}
         return
 
+    # S11-4: 재시도를 다 쓰고도 목표를 못 맞춘 경우. exceeded(초과)뿐 아니라 크게 모자란
+    # 경우도 사람이 봐야 한다 — 스킬 Step 9 가 "여유 있게 짧게 쓰는 것 금지" 라고 못박았다.
+    if exceeded:
+        issues.append(ISSUE_OVER_LIMIT)
+    elif needs_retry:
+        issues.append(ISSUE_UNDERSHOOT)
+
     # S7 부터 이력서(lib/resume.py)·포트폴리오(lib/portfolio.py)가 outputs/[이름]/[기업]_[직무]/
     # 서브폴더에 저장하기 시작했다. 자소서만 플랫 파일로 따로 두면 S7-3(일괄 생성)에서 세 문서가
     # 한 폴더에 모이지 않으니, 여기도 같은 서브폴더 구조로 맞춘다.
@@ -397,7 +415,15 @@ def coverletter_events(name, root, company, position, question, char_limit, coun
         'count_mode': count_mode,
         'exceeded': exceeded,
         'retries': retries,
+        # S11-4: 자동 검사 결과. ready_for_user 는 "검사를 통과했다" 이지
+        # "사용자가 승인했다" 나 "제출했다" 가 아니다.
+        'status': STATUS_REVIEW_REQUIRED if issues else STATUS_READY,
+        'issues': issues,
         'saved_to': str(out_path.relative_to(project_root().resolve())),
+        # S11-5: saved_to 는 프로젝트 루트 기준이라 화면에서 링크를 만들 때 쓰면
+        # outputs/<user>/ 를 다시 떼어내야 한다(예전엔 파일명만 떼어 서브폴더를 잃었다).
+        # rel_path 는 /output/<user>/<path:filename> 라우트에 그대로 붙일 수 있는 형태다.
+        'rel_path': str(out_path.relative_to(out_dir)).replace('\\', '/'),
         'used_experiences': [fn for fn, _ in selected_experiences],  # 코드가 실제로 고른 파일 (LLM 자체보고가 아니다)
     }
 
@@ -489,16 +515,28 @@ def generate_bundle(name):
         yield sse('progress', {'doc': 'portfolio', 'stage': 'done', 'ok': pr.ok, 'path': pr.path, 'error': pr.error})
 
         coverletter_ok, coverletter_error, coverletter_path = False, None, None
+        coverletter_status, coverletter_issues = None, []
         for event, ev_data in coverletter_events(name, root, company, position, question, char_limit,
                                                   count_mode, override_files, folder_name=folder_name,
                                                   use_trends=use_trends):
             tagged = dict(ev_data)
             tagged['doc'] = 'coverletter'
             if event == 'done':
-                coverletter_ok = True
-                coverletter_path = ev_data.get('saved_to')
+                # S11-4: 저장 성공을 품질 통과로 해석하지 않는다. 글자수를 초과했거나
+                # 기업 근거가 없는 초안은 done 으로 와도 ok 가 아니다.
+                coverletter_status = ev_data.get('status', STATUS_READY)
+                coverletter_issues = ev_data.get('issues', [])
+                coverletter_ok = (coverletter_status == STATUS_READY)
+                # S11-5: 이력서(lib/resume.py)와 포트폴리오는 output_dir 기준 상대경로를
+                # 돌려준다. 자소서만 프로젝트 루트 기준(saved_to)이라 화면이 세 경로를
+                # 다른 규칙으로 다뤄야 했다. rel_path 로 통일한다.
+                coverletter_path = ev_data.get('rel_path')
             elif event == 'error':
                 coverletter_error = ev_data.get('message')
+                # error 를 그대로 흘리면 SSE 스트림이 끝나버려 이미 만든 이력서/포트폴리오
+                # 결과까지 화면에 못 준다. 그래서 progress 로 감싸되 failed 임을 표시하고,
+                # 최종 done 의 coverletter_ok=False 로 반드시 드러나게 한다.
+                tagged['stage'] = 'failed'
             yield sse('progress', tagged)
 
         yield sse('done', {
@@ -506,6 +544,7 @@ def generate_bundle(name):
             'portfolio_ok': pr.ok, 'portfolio_path': pr.path,
             'coverletter_ok': coverletter_ok, 'coverletter_path': coverletter_path,
             'coverletter_error': coverletter_error,
+            'coverletter_status': coverletter_status, 'coverletter_issues': coverletter_issues,
             'folder': folder_name,
         })
 

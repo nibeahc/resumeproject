@@ -214,6 +214,32 @@ class GenerateRouteTest(unittest.TestCase):
         saved = (self.root / 'outputs' / '홍길동' / '테스트기업_테스트직무' / '자소서.md').read_text(encoding='utf-8')
         self.assertIn('⚠️ 글자수 초과', saved)  # 저장은 하되 숨기지 않고 경고를 남긴다
 
+    def test_over_limit_marks_review_required(self):
+        """S11-4: 저장은 하되 ready 로 올리지 않는다. 기존 test_still_over_after_retry_flagged_not_hidden
+        이 보장하는 "숨기지 않는다" 에 더해, 성공으로 표시하지도 않는지를 본다."""
+        over1 = llm_result(f'===ANSWER===\n{"가" * 130}\n===END===\n===META===\n참조한 경험: x\n===END===\n')
+        over2 = llm_result(f'===ANSWER===\n{"가" * 120}\n===END===\n===META===\n참조한 경험: x\n===END===\n')
+        with patch.object(generate_route, 'stream_complete', side_effect=[over1, over2]):
+            body = self.post().get_data(as_text=True)
+        self.assertIn('"status": "review_required"', body)
+        self.assertIn('"over_limit"', body)
+
+    def test_ready_for_user_when_within_limit(self):
+        answer = '가' * 97
+        fake = llm_result(f'===ANSWER===\n{answer}\n===END===\n===META===\n참조한 경험: x\n===END===\n')
+        with patch.object(generate_route, 'stream_complete', return_value=fake):
+            body = self.post().get_data(as_text=True)
+        self.assertIn('"status": "ready_for_user"', body)
+        self.assertIn('"issues": []', body)
+
+    def test_rel_path_keeps_subfolder(self):
+        """S11-5: 예전엔 화면이 saved_to 에서 파일명만 떼어 기업_직무/ 를 잃어 링크가 깨졌다.
+        rel_path 는 output_dir 기준이라 /output/<user>/ 뒤에 그대로 붙일 수 있어야 한다."""
+        fake = llm_result('===ANSWER===\n' + '가' * 97 + '\n===END===\n===META===\nx\n===END===\n')
+        with patch.object(generate_route, 'stream_complete', return_value=fake):
+            body = self.post().get_data(as_text=True)
+        self.assertIn('"rel_path": "테스트기업_테스트직무/자소서.md"', body)
+
     def test_count_mode_excludes_whitespace(self):
         answer = ('가 ' * 69).strip()  # 공백 제외 69자 → 70자 목표 대비 오차 1.4%, 재시도 불필요
         fake = llm_result(f'===ANSWER===\n{answer}\n===END===\n===META===\n참조한 경험: x\n===END===\n')
@@ -387,6 +413,29 @@ class GenerateBundleTest(unittest.TestCase):
         payload = {'job_id': str(self.job_id), 'question': '지원 동기', 'char_limit': '50'}
         payload.update(overrides)
         return self.c.post('/generate/홍길동/bundle', json=payload)
+
+    def test_over_limit_coverletter_is_not_ok(self):
+        """S11-4: 번들은 done 만 보고 coverletter_ok=True 로 올렸다. 글자수를 초과한
+        초안은 저장되더라도 성공이 아니다."""
+        self.insert_match()
+        over = llm_result('===ANSWER===\n' + '가' * 130 + '\n===END===\n===META===\nx\n===END===\n')
+        fake_portfolio = llm_result('===TOC===\n1. 도입\n===END===\n\n===CHAPTER: 1===\n요약\n===END===\n')
+        with patch.object(portfolio_module, 'stream_complete', return_value=fake_portfolio), \
+             patch.object(generate_route, 'stream_complete', return_value=over):
+            body = self.post().get_data(as_text=True)
+        self.assertIn('"coverletter_ok": false', body)
+        self.assertIn('"coverletter_status": "review_required"', body)
+        self.assertIn('"over_limit"', body)
+
+    def test_within_limit_coverletter_is_ok(self):
+        self.insert_match()
+        fine = llm_result('===ANSWER===\n' + '가' * 49 + '\n===END===\n===META===\nx\n===END===\n')
+        fake_portfolio = llm_result('===TOC===\n1. 도입\n===END===\n\n===CHAPTER: 1===\n요약\n===END===\n')
+        with patch.object(portfolio_module, 'stream_complete', return_value=fake_portfolio), \
+             patch.object(generate_route, 'stream_complete', return_value=fine):
+            body = self.post().get_data(as_text=True)
+        self.assertIn('"coverletter_ok": true', body)
+        self.assertIn('"coverletter_status": "ready_for_user"', body)
 
     def test_missing_job_id_rejected(self):
         r = self.c.post('/generate/홍길동/bundle', json={'question': 'x', 'char_limit': '50'})
