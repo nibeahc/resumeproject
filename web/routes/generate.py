@@ -73,14 +73,20 @@ def _parse_bool(data, key, default):
     return bool(raw)
 
 
+def _parse_use_quality_check(data):
+    """S11-10: 논지 검토 호출을 켤지. 기본 True.
+    끄면 LLM 호출이 기존과 같은 최대 2회로 돌아간다 (켜면 최대 4회)."""
+    return _parse_bool(data, 'use_quality_check', default=True)
+
+
 def _parse_use_trends(data):
     """안 보내면 기본값은 True(트렌드 반영) — 기존 동작(항상 반영)과 호환된다."""
     return _parse_bool(data, 'use_trends', default=True)
 
 
 def _validate_generate_params(data):
-    """company/position/question/분량 검증. (errors, company, position, question,
-    length, override_files, use_trends, allow_unresearched) 를 돌려준다 — SSE 제너레이터가
+    """company/position/question/분량 검증. (errors, company, position, question, length,
+    override_files, use_trends, allow_unresearched, use_quality_check) 를 돌려준다 — SSE 제너레이터가
     시작되기 *전에* 동기적으로 끝내야 한다 (S1-3 에서 겪은, 제너레이터 안에서 abort/에러 내면
     이미 200이 나간 뒤라 늦다는 패턴을 여기서도 피한다)."""
     company = (data.get('company') or '').strip()
@@ -122,12 +128,13 @@ def _validate_generate_params(data):
         override_files = [f.strip() for f in override_files.split(',') if f.strip()]
 
     use_trends = _parse_use_trends(data)
+    use_quality_check = _parse_use_quality_check(data)
     # S11-1: 기업 자료 없이 쓰겠다는 사용자의 명시적 동의. 기본값은 False 다 —
     # 동의 없이 추론으로 채우는 것이 검토 0.1 의 핵심 지적이었다.
     allow_unresearched = _parse_bool(data, 'allow_unresearched', default=False)
 
     return (errors, company, position, question, length, override_files,
-            use_trends, allow_unresearched)
+            use_trends, allow_unresearched, use_quality_check)
 
 
 
@@ -136,7 +143,7 @@ def generate(name):
     root = user_dir(name)
     data = request.get_json(silent=True) or request.form
     (errors, company, position, question, length, override_files,
-     use_trends, allow_unresearched) = _validate_generate_params(data)
+     use_trends, allow_unresearched, use_quality_check) = _validate_generate_params(data)
 
     if errors:
         def bad():
@@ -160,7 +167,8 @@ def generate(name):
                 company=company, position=position, length=length, context=ctx,
                 override_filenames=override_files,
                 allow_unresearched_company=allow_unresearched,
-                output_dir=output_dir(name), db_path=db_path, complete=stream_complete):
+                output_dir=output_dir(name), db_path=db_path,
+                quality_check=use_quality_check, complete=stream_complete):
             yield sse(event, ev_data)
 
     return Response(stream_with_context(stream()), mimetype='text/event-stream')
@@ -182,7 +190,7 @@ def generate_bundle(name):
         return jsonify(success=False, error='공고를 선택해주세요.'), 400
 
     (errors, _, _, question, length, override_files,
-     use_trends, allow_unresearched) = _validate_generate_params(
+     use_trends, allow_unresearched, use_quality_check) = _validate_generate_params(
         {**data, 'company': 'x', 'position': 'x'})  # company/position 은 공고에서 가져오므로 폼 값 검증은 건너뜀
     errors = [e for e in errors if '기업명' not in e and '직무명' not in e]
     if errors:
@@ -247,7 +255,8 @@ def generate_bundle(name):
                 override_filenames=override_files,
                 allow_unresearched_company=allow_unresearched,
                 output_dir=output_dir(name), folder_name=folder_name,
-                db_path=db_path, complete=stream_complete):
+                db_path=db_path, quality_check=use_quality_check,
+                complete=stream_complete):
             tagged = dict(ev_data)
             tagged['doc'] = 'coverletter'
             if event == 'done':

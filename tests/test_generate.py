@@ -198,7 +198,11 @@ class GenerateRouteTest(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def post(self, **kw):
-        payload = {'company': '테스트기업', 'position': '테스트직무', 'question': '지원 동기', 'char_limit': 100}
+        # S11-10: 이 클래스의 테스트 대부분은 글자수·경험 선택·트렌드를 본다. 검토 호출은
+        # LLM 을 한 번 더 부르므로 기본적으로 꺼둔다 — 안 그러면 모든 스텁이 REVIEW 블록까지
+        # 흉내 내야 하고, 테스트가 무엇을 보는 건지 흐려진다. 검토 경로는 QualityCheckTest 가 본다.
+        payload = {'company': '테스트기업', 'position': '테스트직무', 'question': '지원 동기',
+                   'char_limit': 100, 'use_quality_check': False}
         payload.update(kw)
         return self.c.post('/generate/홍길동', json=payload)
 
@@ -613,7 +617,8 @@ class GenerateBundleTest(unittest.TestCase):
         conn.close()
 
     def post(self, **overrides):
-        payload = {'job_id': str(self.job_id), 'question': '지원 동기', 'char_limit': '50'}
+        payload = {'job_id': str(self.job_id), 'question': '지원 동기', 'char_limit': '50',
+                   'use_quality_check': False}   # S11-10: 위 GenerateRouteTest.post 와 같은 이유
         payload.update(overrides)
         return self.c.post('/generate/홍길동/bundle', json=payload)
 

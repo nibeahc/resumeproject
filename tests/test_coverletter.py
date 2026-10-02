@@ -71,7 +71,10 @@ class JobToTextTest(unittest.TestCase):
         self.assertEqual(C._job_to_text({}), '')
 
 
-class GenerateWithoutFlaskTest(unittest.TestCase):
+class EngineFixture:
+    """임시 사용자/기업/출력 디렉터리와 호출 헬퍼. 이 클래스 자체는 TestCase 가 아니다 —
+    TestCase 를 상속하면 아래 테스트 클래스들이 기반 테스트까지 매번 다시 돌린다."""
+
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.user_root = self.tmp / 'users' / '홍길동'
@@ -102,12 +105,15 @@ class GenerateWithoutFlaskTest(unittest.TestCase):
         return C.gather_context(self.user_root, **base)
 
     def run_events(self, **kw):
+        # S11-10: 검토 호출은 전용 테스트(QualityCheckTest)에서만 켠다.
         params = dict(company='기업', position='직무', length=bounded(100),
                       context=self.ctx(), output_dir=self.out, db_path=self.db_path,
-                      complete=fake_complete())
+                      quality_check=False, complete=fake_complete())
         params.update(kw)
         return list(C.generate_coverletter_events('홍길동', '지원 동기', self.exp_dir, **params))
 
+
+class GenerateWithoutFlaskTest(EngineFixture, unittest.TestCase):
     def test_does_not_touch_real_project_db(self):
         """S11-9 회귀 방지: db_path 를 안 넘기면 lib.db 가 실제 data/app.db 를 쓴다.
         이 파일을 처음 돌렸을 때 실제로 홍길동 행 3개가 프로젝트 DB 에 들어갔다."""
@@ -227,3 +233,153 @@ class GenerateWithoutFlaskTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+PLAN_OK = '===PLAN===\np1 | 정확성이 신뢰로 이어진다 | 지원 이유 | 2024-경험.md | -\n===END==='
+
+
+def draft(answer='가' * 97, plan=PLAN_OK, meta='참조한 경험: 테스트 경험 (2024-경험.md)'):
+    body = f'{plan}\n' if plan else ''
+    return llm_result(f'{body}===ANSWER===\n{answer}\n===END===\n===META===\n{meta}\n===END===\n')
+
+
+def review(issues='[]', sentences=None, claim='정확성이 신뢰로 이어진다'):
+    sentences = sentences or '[{"id": "s1", "role": "claim"}]'
+    return llm_result('===REVIEW===\n{"inferred_claim": "%s", "sentences": %s, "issues": %s}\n===END===\n'
+                      % (claim, sentences, issues))
+
+
+class ScriptedLLM:
+    """호출 순서대로 미리 정한 응답을 돌려준다. system 프롬프트도 기록해
+    검토가 정말 별도 스킬로 불렸는지 확인한다."""
+
+    def __init__(self, *responses):
+        self.responses = list(responses)
+        self.systems = []
+        self.messages = []
+
+    def __call__(self, system=None, messages=None, max_tokens=None, on_delta=None):
+        self.systems.append(system or '')
+        self.messages.append(messages)
+        return self.responses.pop(0) if self.responses else draft()
+
+    @property
+    def calls(self):
+        return len(self.systems)
+
+
+class QualityCheckTest(EngineFixture, unittest.TestCase):
+    """S11-10 / 설계검토 B. 호출 수가 설계 제약이다 — 최악 4회, 끄면 2회."""
+
+    def run_quality(self, llm, **kw):
+        params = dict(quality_check=True, complete=llm)
+        params.update(kw)
+        return self.run_events(**params)
+
+    def test_review_runs_in_separate_call_with_its_own_skill(self):
+        llm = ScriptedLLM(draft(), review())
+        events = self.run_quality(llm)
+        self.assertEqual(llm.calls, 2)                       # 초안 1 + 검토 1
+        self.assertIn('자소서 초안 검토', llm.systems[1])      # review-coverletter.md
+        self.assertNotEqual(llm.systems[0], llm.systems[1])
+        # 검토 입력에 계획을 넣지 않는다 — 초안에서 논지를 역으로 읽게 한다 (B-2)
+        self.assertNotIn('===PLAN===', llm.messages[1][0]['content'])
+        self.assertEqual(events[-1][1]['status'], C.STATUS_READY)
+
+    def test_plan_is_requested_and_parsed(self):
+        llm = ScriptedLLM(draft(), review())
+        data = self.run_quality(llm)[-1][1]
+        self.assertIn('===PLAN===', llm.messages[0][0]['content'])
+        self.assertEqual(len(data['plan']), 1)
+        self.assertEqual(data['plan'][0]['experiences'], ['2024-경험.md'])
+
+    def test_missing_plan_is_flagged(self):
+        data = self.run_quality(ScriptedLLM(draft(plan=None), review()))[-1][1]
+        self.assertIn(C.ISSUE_PLAN_MISSING, data['issues'])
+        self.assertEqual(data['status'], C.STATUS_REVIEW_REQUIRED)
+
+    def test_plan_citing_unknown_experience_is_flagged(self):
+        bad = '===PLAN===\np1 | 주장 | 요구 | 2099-없는경험.md | -\n===END==='
+        data = self.run_quality(ScriptedLLM(draft(plan=bad), review()))[-1][1]
+        self.assertIn(C.ISSUE_PLAN_UNKNOWN_EXPERIENCE, data['issues'])
+
+    def test_blocking_issue_triggers_one_repair(self):
+        bad = ('[{"sentence_ids": ["s1"], "kind": "unsupported_claim", '
+               '"reason": "행동 근거가 없다"}]')
+        llm = ScriptedLLM(draft(), review(issues=bad), draft(answer='나' * 97))
+        data = self.run_quality(llm)[-1][1]
+        self.assertEqual(llm.calls, 3)            # 초안 + 검토 + 수정
+        self.assertEqual(data['repairs'], 1)
+        self.assertIn('나', data['answer'])
+        # 수정 프롬프트는 "더 잘 써라" 가 아니라 문제 문장과 유형을 준다 (B-3)
+        repair_msg = llm.messages[2][-1]['content']
+        self.assertIn('unsupported_claim', repair_msg)
+        self.assertIn('s1', repair_msg)
+        self.assertIn('2024-경험.md', repair_msg)
+
+    def test_repair_is_rejected_if_it_breaks_length(self):
+        """평가 지적만 고치고 글자수가 틀어진 수정본으로 바꾸지 않는다."""
+        bad = ('[{"sentence_ids": ["s1"], "kind": "unsupported_claim", "reason": "근거 없음"}]')
+        llm = ScriptedLLM(draft(), review(issues=bad), draft(answer='다' * 400))
+        events = self.run_quality(llm)
+        data = events[-1][1]
+        self.assertIn('repair_rejected', [d.get('stage') for _, d in events if isinstance(d, dict)])
+        self.assertNotIn('다', data['answer'])     # 원래 초안을 유지
+        self.assertFalse(data['exceeded'])
+
+    def test_review_with_wrong_sentence_ids_is_treated_as_failed(self):
+        """엉뚱한 문장을 가리키는 지적은 고칠 수가 없다 (B-2)."""
+        llm = ScriptedLLM(draft(), review(sentences='[{"id": "s99", "role": "claim"}]'))
+        data = self.run_quality(llm)[-1][1]
+        self.assertIn(C.ISSUE_REVIEW_FAILED, data['issues'])
+        self.assertIsNotNone(data['review_error'])
+        self.assertEqual(data['status'], C.STATUS_REVIEW_REQUIRED)
+
+    def test_unparseable_review_does_not_lose_the_draft(self):
+        llm = ScriptedLLM(draft(), llm_result('검토 못 하겠습니다'))
+        data = self.run_quality(llm)[-1][1]
+        self.assertIn(C.ISSUE_REVIEW_FAILED, data['issues'])
+        self.assertTrue(data['answer'])
+        self.assertTrue((self.out / '기업_직무' / '자소서.md').exists())
+
+    def test_toggle_off_keeps_two_calls_and_no_plan(self):
+        llm = ScriptedLLM(draft(plan=None))
+        data = self.run_events(quality_check=False, complete=llm)[-1][1]
+        self.assertEqual(llm.calls, 1)
+        self.assertNotIn('===PLAN===', llm.messages[0][0]['content'])
+        self.assertIsNone(data['review'])
+        self.assertEqual(data['status'], C.STATUS_READY)
+
+    def test_worst_case_is_four_calls(self):
+        """초안 1 + 글자수 재시도 1 + 검토 1 + 수정 1. 크레딧 소진 사고 때문에 상한을 둔다."""
+        bad = '[{"sentence_ids": ["s1"], "kind": "unsupported_claim", "reason": "x"}]'
+        llm = ScriptedLLM(draft(answer='가' * 300),     # 초과 → 재시도
+                          draft(answer='가' * 97),
+                          review(issues=bad),
+                          draft(answer='나' * 97))
+        self.run_quality(llm)
+        self.assertEqual(llm.calls, 4)
+
+
+class SecondExperienceTest(EngineFixture, unittest.TestCase):
+    """설계검토 B-1: "둘 다 분석 경험" 은 두 번째 경험을 쓸 이유가 아니다."""
+
+    def setUp(self):
+        super().setUp()
+        (self.exp_dir / '2023-둘째.md').write_text(
+            '# 둘째 경험\n\n## 메타\n\n- 카테고리: 리더십\n- 키워드: 리더십\n\n내용', encoding='utf-8')
+
+    def test_two_experiences_without_a_stated_role_is_flagged(self):
+        plan = ('===PLAN===\np1 | 주장 | 요구 | 2024-경험.md, 2023-둘째.md | -\n===END===')
+        llm = ScriptedLLM(draft(plan=plan), review())
+        data = self.run_events(quality_check=True, complete=llm,
+                               override_filenames=['2024-경험.md', '2023-둘째.md'])[-1][1]
+        self.assertIn(C.ISSUE_SECOND_EXPERIENCE_UNJUSTIFIED, data['issues'])
+
+    def test_two_experiences_with_a_role_passes(self):
+        plan = ('===PLAN===\np1 | 주장 | 요구 | 2024-경험.md, 2023-둘째.md | '
+                '대조 — 혼자 할 때와 팀일 때의 차이를 보여준다\n===END===')
+        llm = ScriptedLLM(draft(plan=plan), review())
+        data = self.run_events(quality_check=True, complete=llm,
+                               override_filenames=['2024-경험.md', '2023-둘째.md'])[-1][1]
+        self.assertNotIn(C.ISSUE_SECOND_EXPERIENCE_UNJUSTIFIED, data['issues'])

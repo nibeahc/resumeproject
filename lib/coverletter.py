@@ -28,6 +28,8 @@ from lib.selector import select as select_experiences
 from lib.skills import load_skill
 
 
+_PLAN_BLOCK = re.compile(r'===PLAN===\n(?P<body>.*?)\n===END===', re.S)
+_REVIEW_BLOCK = re.compile(r'===REVIEW===\n(?P<body>.*?)\n===END===', re.S)
 _ANSWER_BLOCK = re.compile(r'===ANSWER===\n(?P<body>.*?)\n===END===', re.S)
 _META_BLOCK = re.compile(r'===META===\n(?P<body>.*?)\n===END===', re.S)
 
@@ -49,6 +51,18 @@ ISSUE_UNDERSHOOT = 'undershoot'
 ISSUE_DROPPED_OVERRIDES = 'dropped_overrides'
 ISSUE_UNRESEARCHED_COMPANY = 'unresearched_company'
 ISSUE_CITED_UNKNOWN = 'cited_unknown_experience'
+# S11-10 (설계검토 B)
+ISSUE_PLAN_MISSING = 'plan_missing'
+ISSUE_PLAN_UNKNOWN_EXPERIENCE = 'plan_cites_unknown_experience'
+ISSUE_SECOND_EXPERIENCE_UNJUSTIFIED = 'second_experience_unjustified'
+ISSUE_REVIEW_FAILED = 'review_failed'
+ISSUE_UNSUPPORTED_CLAIM = 'unsupported_claim'
+ISSUE_NEW_UNRELATED_CLAIM = 'new_unrelated_claim'
+ISSUE_FABRICATED_FACT = 'fabricated_fact'
+
+# 검토 결과 중 "사람이 반드시 봐야 하는" 유형. 나머지는 기록만 한다.
+BLOCKING_REVIEW_KINDS = frozenset({'unsupported_claim', 'new_unrelated_claim', 'fabricated_fact'})
+MAX_REPAIRS = 1   # 설계검토 B-3: 수정은 최대 1회. 그 뒤엔 사람에게 넘긴다
 
 
 class LengthSpec(NamedTuple):
@@ -130,7 +144,7 @@ def strip_placeholder_rules(text: str) -> str:
 
 
 def build_prompt(name, company, position, question, length: 'LengthSpec',
-                  ctx: 'CoverletterContext', selected_experiences):
+                  ctx: 'CoverletterContext', selected_experiences, want_plan: bool = True):
     """S11-7: 위치 인자 14개를 (length, ctx) 둘로 묶었다. 인자를 하나 더할 때마다
     두 호출 지점을 손으로 맞춰야 했고, 실제로 그러다 틀린 적이 있다."""
     profile_text = ctx.profile_text
@@ -159,6 +173,23 @@ def build_prompt(name, company, position, question, length: 'LengthSpec',
              f'- 지원동기는 기업 칭찬이 아니라 **직무 자체에 대한 관심과 본인 경험의 연결**로 쓰세요.'
     )
     rules_note = strip_placeholder_rules(rules_text) or '(비어 있음 — 적용할 규칙 없음, 무시)'
+    # S11-10 / 설계검토 B-1: 쓰기 전에 논지를 설계하게 한다. 검토 문서는 별도 선행 호출을
+    # 제안하지만, 같은 응답의 **앞부분**에 받으면 호출을 늘리지 않고 대부분의 효과를 얻는다
+    # (모델은 순차 생성하므로 PLAN 토큰이 실제로 ANSWER 보다 앞선다).
+    # 한계: 사용자가 계획을 승인한 뒤 쓰는 구조는 아니다. 승인 단계가 필요해지면
+    # output_dir=None 으로 PLAN 만 받는 호출을 먼저 두는 2단계로 올릴 수 있다.
+    multi = len(selected_experiences) > 1
+    # want_plan=False 면 PLAN 을 요구하지 않는다. 논지 계획은 품질 검사 기능의 일부이고,
+    # 검사를 끈 호출에 계획만 받아봐야 아무도 보지 않는다 (토큰만 쓴다).
+    plan_block = '' if not want_plan else f'''===PLAN===
+(문단마다 한 줄. 파이프로 구분. 설명 없이 표만)
+문단id | 이 문단의 핵심 주장 한 문장 | 답하는 문항 요구사항 | 쓸 경험 파일명 | {'두 번째 경험의 역할' if multi else '-'}
+예시: p1 | 반복 업무의 정확성이 전체 운영 신뢰로 이어진다고 본다 | 지원 이유 | 2026-인턴십.md | -
+{'두 경험을 모두 쓴다면, 두 번째가 같은 주장을 보강하는지 / 대조하는지 / 변화 과정을 보여주는지를 적으세요. "둘 다 분석 경험" 은 이유가 아닙니다. 두 번째를 지웠을 때 논증에서 무엇이 사라지는지 말할 수 없다면 쓰지 마세요.' if multi else '경험이 하나이므로 마지막 칸은 - 로 둡니다.'}
+===END===
+
+'''
+
     # S11-3: 제한이 있을 때와 없을 때는 요구가 정반대다. 전자는 "넘기지 마라",
     # 후자는 "짧게 끝내지 마라, 다만 경험을 더 늘리지도 마라" 다.
     if length.bounded:
@@ -245,7 +276,7 @@ Step 2, Step 4 는 아래 안내를 따르세요. Step 9(출력 형식), Step 10
 - bullet point 금지, 문단 형식.
 
 [출력 형식 — 반드시 이 형식만 사용, 다른 설명 붙이지 말 것]
-===ANSWER===
+{plan_block}===ANSWER===
 (작성된 문단. 이것만 글자수 계산에 사용되니 다른 텍스트를 섞지 마세요)
 ===END===
 
@@ -332,6 +363,139 @@ def parse_answer(text):
     answer = a.group('body').strip() if a else ''
     meta = m.group('body').strip() if m else ''
     return answer, meta
+
+
+# ---------------------------------------------------------------------------
+# 품질 검사 (S11-10, 설계검토 B)
+#
+# 호출 수를 설계 제약으로 둔다. 2026-09-27 세션이 크레딧 소진으로 끊긴 적이 있다
+# (PROGRESS.md). 그래서 검토 문서가 제안한 "별도 선행 호출로 논지 계획" 대신 같은
+# 응답의 앞부분에 PLAN 을 받고(추가 0회), 검토 1회 + 수정 1회까지만 쓴다.
+# 최악의 경우 초안 1 + 재시도 1 + 검토 1 + 수정 1 = 4회. 끄면 기존과 같은 2회.
+#
+# 검토 문서가 인용한 "LLMs Cannot Self-Correct Reasoning Yet" 때문에라도, 검토 호출
+# 하나를 더하면 품질이 보장된다고 보지 않는다. 결정적 린터가 먼저고, 검토는 그 위에 얹는다.
+# ---------------------------------------------------------------------------
+
+# 한국어 문장 분리. 약어·소수점·인용을 완벽히 가르지는 못한다(설계검토 B-2 가 지적한 바).
+# 자소서는 bullet 을 금지하고 평문 문단만 쓰므로 이 정도로 충분하다고 보고, 대신 검토가
+# 돌려준 문장 ID 가 우리가 보낸 집합과 다르면 검토 자체를 실패 처리한다.
+_SENTENCE_SPLIT = re.compile(r'(?<=[.!?])\s+')
+
+
+def split_sentences(text: str) -> List[str]:
+    return [s.strip() for s in _SENTENCE_SPLIT.split(text.strip()) if s.strip()]
+
+
+def parse_plan(text: str) -> List[dict]:
+    """===PLAN=== 블록을 파싱한다. 형식을 안 지켜도 예외를 내지 않는다 —
+    계획이 없다는 사실 자체가 린터의 판정 대상이다."""
+    m = _PLAN_BLOCK.search(text or '')
+    if not m:
+        return []
+    rows = []
+    for line in m.group('body').split('\n'):
+        line = line.strip()
+        if not line or line.startswith('(') or line.startswith('예시'):
+            continue
+        cells = [c.strip() for c in line.split('|')]
+        if len(cells) < 4 or cells[0].startswith('문단id'):
+            continue
+        rows.append({'id': cells[0], 'claim': cells[1], 'requirement': cells[2],
+                      'experiences': [f for f in _MD_FILENAME.findall(cells[3])],
+                      'second_role': cells[4] if len(cells) > 4 else ''})
+    return rows
+
+
+def lint_plan(plan: List[dict], supplied_filenames) -> List[str]:
+    """결정적 린터. 모델 호출 없이 계획만 보고 판정한다."""
+    issues = []
+    if not plan:
+        return [ISSUE_PLAN_MISSING]
+    supplied = set(supplied_filenames)
+    if any(fn not in supplied for row in plan for fn in row['experiences']):
+        issues.append(ISSUE_PLAN_UNKNOWN_EXPERIENCE)
+    # 경험을 둘 쓰면서 두 번째의 역할을 못 적었다면, 왜 둘인지 설명하지 못한 것이다.
+    if len(supplied) > 1:
+        used = {fn for row in plan for fn in row['experiences']}
+        roles = ' '.join(row['second_role'] for row in plan).strip(' -')
+        if len(used) > 1 and not roles:
+            issues.append(ISSUE_SECOND_EXPERIENCE_UNJUSTIFIED)
+    return issues
+
+
+def build_review_input(question: str, draft: str, *, job_text: str = '',
+                        company_text: str = '', allowed_experiences=()) -> str:
+    """검토 호출의 입력. **계획(PLAN)은 넣지 않는다** — 설계검토 B-2 의 요지대로
+    평가자가 초안에서 논지를 역으로 읽게 하고, 계획과의 대조는 코드가 한다."""
+    numbered = '\n'.join(f's{i}: {s}' for i, s in enumerate(split_sentences(draft), 1))
+    exp_block = '\n'.join(f'--- {fn} ---\n{text}' for fn, text in allowed_experiences)
+    parts = [f'[문항]\n{question}', f'[초안 — 문장 ID 가 붙어 있습니다]\n{numbered}']
+    if exp_block:
+        parts.append('[이 글이 쓸 수 있는 유일한 사실 출처]\n' + exp_block)
+    if company_text.strip():
+        parts.append('[확인된 기업 자료]\n' + company_text.strip())
+    if job_text.strip():
+        parts.append('[지원 공고]\n' + job_text.strip())
+    parts.append('위 형식대로 ===REVIEW=== 블록만 돌려주세요.')
+    return '\n\n'.join(parts)
+
+
+def parse_review(text: str, expected_ids) -> Tuple[Optional[dict], Optional[str]]:
+    """(검토 결과, 실패 사유). 문장 ID 가 우리가 보낸 집합과 어긋나면 실패로 본다 —
+    엉뚱한 문장을 가리키는 지적은 고칠 수가 없다 (설계검토 B-2)."""
+    import json as _json
+    m = _REVIEW_BLOCK.search(text or '')
+    if not m:
+        return None, 'REVIEW 블록 없음'
+    try:
+        data = _json.loads(m.group('body'))
+    except ValueError as e:
+        return None, f'JSON 파싱 실패: {e}'
+    if not isinstance(data, dict):
+        return None, 'JSON 최상위가 객체가 아님'
+
+    expected = set(expected_ids)
+    got = {s.get('id') for s in data.get('sentences', []) if isinstance(s, dict)}
+    if got != expected:
+        missing = sorted(expected - got)
+        extra = sorted(got - expected)
+        return None, f'문장 ID 불일치 (누락 {missing}, 없는 ID {extra})'
+
+    for issue in data.get('issues', []):
+        if not isinstance(issue, dict):
+            return None, 'issues 항목이 객체가 아님'
+        if set(issue.get('sentence_ids') or []) - expected:
+            return None, '지적이 없는 문장 ID 를 가리킴'
+    return data, None
+
+
+def blocking_issues(review: dict) -> List[dict]:
+    return [i for i in review.get('issues', []) if i.get('kind') in BLOCKING_REVIEW_KINDS]
+
+
+def build_repair_prompt(review: dict, draft: str, allowed_filenames) -> str:
+    """"더 잘 써라" 가 아니라 문제 문장 ID, 결함 유형, 유지할 사실, 허용 범위를 준다
+    (설계검토 B-3)."""
+    sentences = {f's{i}': s for i, s in enumerate(split_sentences(draft), 1)}
+    lines = []
+    for issue in blocking_issues(review):
+        ids = issue.get('sentence_ids') or []
+        quoted = ' / '.join(sentences.get(i, '') for i in ids)
+        lines.append(f'- [{issue.get("kind")}] {", ".join(ids)}: {issue.get("reason", "")}\n'
+                      f'  해당 문장: {quoted}')
+    return f"""검토 결과 아래 문제가 확인됐습니다. **지적된 부분만** 고쳐 주세요.
+
+{chr(10).join(lines)}
+
+지킬 것:
+- 쓸 수 있는 경험은 그대로입니다: {', '.join(allowed_filenames)}. 새 경험이나 새 사실을 넣지 마세요.
+- 지적되지 않은 문장은 건드리지 마세요.
+- 근거가 없어서 주장을 받칠 수 없다면, 형용사를 늘리지 말고 그 주장을 빼세요.
+- 글자수 조건과 문체 규칙은 그대로 유지합니다.
+
+같은 형식(===PLAN=== / ===ANSWER=== / ===META===)으로 전체를 다시 돌려주세요.
+"""
 
 
 @dataclass
@@ -429,6 +593,7 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
                                  output_dir: Optional[Path] = None,
                                  folder_name: Optional[str] = None,
                                  db_path=None,
+                                 quality_check: bool = True,
                                  complete=None):
     """자소서 한 문항을 생성하고 (event, data) 튜플을 yield 하는 제너레이터.
 
@@ -513,10 +678,13 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
                         'references': len(ctx.reference_texts)}
 
     system = load_skill('write-coverletter')
-    user_msg = build_prompt(name, company, position, question, length, ctx, selected_experiences)
+    user_msg = build_prompt(name, company, position, question, length, ctx, selected_experiences,
+                             want_plan=quality_check)
     messages = [{'role': 'user', 'content': user_msg}]
 
-    def call_llm(msgs):
+    def call_llm(msgs, system=system):
+        """system 기본값은 작성 스킬이다. 검토 호출만 다른 스킬을 넘긴다 —
+        **생성 대화와 분리된 호출**이어야 하므로 messages 도 새로 만든다 (설계검토 B-2)."""
         q = queue.Queue()
 
         def worker():
@@ -583,20 +751,97 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
         yield 'error', {'message': 'LLM 출력에서 ANSWER 블록을 찾지 못했습니다.', 'raw': result['text'][:500]}
         return
 
-    # S11-4: 재시도를 다 쓰고도 목표를 못 맞춘 경우. exceeded(초과)뿐 아니라 크게 모자란
-    # 경우도 사람이 봐야 한다 — 스킬 Step 9 가 "여유 있게 짧게 쓰는 것 금지" 라고 못박았다.
-    if exceeded:
-        issues.append(ISSUE_OVER_LIMIT)
-    elif needs_retry:
-        issues.append(ISSUE_UNDERSHOOT)
-
-    # S11-9: 모델이 "참조한 경험" 으로 적은 파일명이 실제로 준 파일인지 대조한다.
     supplied_filenames = [fn for fn, _ in selected_experiences]
-    cited_experiences, unknown_cited = validate_cited_experiences(meta, supplied_filenames)
+    context_issues = list(issues)   # 기업 미조사, override 잘림 등 — 다시 쓴다고 사라지지 않는다
+
+    def deterministic_check(raw_text, answer_text, meta_text):
+        """모델 호출 없이 판정할 수 있는 것 전부. 수정 뒤에도 그대로 다시 돌린다 —
+        평가 점수만 좋아지고 글자수나 사실이 틀어진 수정본으로 바꾸지 않기 위해서다."""
+        found = []
+        n = count_chars(answer_text, length.count_mode)
+        over = False
+        if length.bounded:
+            over = n > length.hard_max_chars
+            if over:
+                found.append(ISSUE_OVER_LIMIT)
+            elif abs(n - length.hard_max_chars) / length.hard_max_chars > LENGTH_TOLERANCE:
+                found.append(ISSUE_UNDERSHOOT)
+        # S11-10: 논지 계획 린트 (모델 호출 0회 — 같은 응답에 함께 왔다)
+        plan_rows = parse_plan(raw_text)
+        if quality_check:
+            found.extend(lint_plan(plan_rows, supplied_filenames))
+        # S11-9: 모델이 "참조한 경험" 으로 적은 파일명이 실제로 준 파일인지 대조
+        cited_, unknown_ = validate_cited_experiences(meta_text, supplied_filenames)
+        if unknown_:
+            found.append(ISSUE_CITED_UNKNOWN)
+        return found, n, over, plan_rows, cited_, unknown_
+
+    det, actual, exceeded, plan, cited_experiences, unknown_cited = deterministic_check(
+        result['text'], answer, meta)
     if unknown_cited:
-        issues.append(ISSUE_CITED_UNKNOWN)
         yield 'progress', {'stage': 'cited_unknown', 'cited': cited_experiences,
                             'unknown': unknown_cited, 'supplied': supplied_filenames}
+    if ISSUE_PLAN_MISSING not in det:
+        yield 'progress', {'stage': 'plan', 'paragraphs': len(plan)}
+
+    # S11-10: 별도 컨텍스트 검토 1회 + 지적 기반 수정 1회
+    review, review_error, repairs = None, None, 0
+    if quality_check:
+        sentence_ids = [f's{i}' for i in range(1, len(split_sentences(answer)) + 1)]
+        yield 'progress', {'stage': 'reviewing', 'sentences': len(sentence_ids)}
+        review_input = build_review_input(
+            question, answer, job_text=ctx.job_text, company_text=ctx.company_text,
+            allowed_experiences=selected_experiences)
+        try:
+            review_raw = yield from call_llm([{'role': 'user', 'content': review_input}],
+                                              system=load_skill('review-coverletter'))
+            review, review_error = parse_review(review_raw['text'], sentence_ids)
+        except RuntimeError as e:
+            review_error = f'검토 호출 실패: {e}'
+
+        if review_error:
+            # 검토가 실패해도 초안을 버리지 않는다. 검사하지 못했다는 사실만 남긴다.
+            det.append(ISSUE_REVIEW_FAILED)
+            yield 'progress', {'stage': 'review_failed', 'error': review_error}
+        else:
+            blocking = blocking_issues(review)
+            yield 'progress', {'stage': 'reviewed', 'issues': len(review.get('issues', [])),
+                                'blocking': len(blocking),
+                                'inferred_claim': review.get('inferred_claim', '')}
+            if blocking and repairs < MAX_REPAIRS:
+                repairs += 1
+                yield 'progress', {'stage': 'repair', 'attempt': repairs}
+                messages = messages + [
+                    {'role': 'assistant', 'content': result['text']},
+                    {'role': 'user', 'content': build_repair_prompt(review, answer, supplied_filenames)},
+                ]
+                try:
+                    repaired = yield from call_llm(messages)
+                except RuntimeError as e:
+                    yield 'progress', {'stage': 'repair_failed', 'error': str(e)}
+                else:
+                    new_answer, new_meta = parse_answer(repaired['text'])
+                    if new_answer:
+                        new_det, n2, over2, plan2, cited2, unknown2 = deterministic_check(
+                            repaired['text'], new_answer, new_meta)
+                        # 검토 지적을 고치면서 글자수나 사실이 틀어졌다면 수정본을 버린다.
+                        worse = set(new_det) - set(det)
+                        if worse:
+                            yield 'progress', {'stage': 'repair_rejected',
+                                                'new_issues': sorted(worse)}
+                        else:
+                            result, answer, meta = repaired, new_answer, new_meta
+                            det, actual, exceeded = new_det, n2, over2
+                            plan, cited_experiences, unknown_cited = plan2, cited2, unknown2
+                    else:
+                        yield 'progress', {'stage': 'repair_failed', 'error': 'ANSWER 블록 없음'}
+            # 수정 후에도(또는 수정 없이) 남은 차단성 지적은 사람에게 넘긴다.
+            for issue in blocking_issues(review) if repairs == 0 else []:
+                kind = issue.get('kind')
+                if kind and kind not in det:
+                    det.append(kind)
+
+    issues = context_issues + [i for i in det if i not in context_issues]
 
     # S7 부터 이력서(lib/resume.py)·포트폴리오(lib/portfolio.py)가 outputs/[이름]/[기업]_[직무]/
     # 서브폴더에 저장하기 시작했다. 자소서만 플랫 파일로 따로 두면 S7-3(일괄 생성)에서 세 문서가
@@ -615,6 +860,7 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
             'issues': issues, 'saved_to': None, 'rel_path': None,
             'used_experiences': supplied_filenames,
             'cited_experiences': cited_experiences,
+            'plan': plan, 'review': review, 'review_error': review_error, 'repairs': repairs,
         }
         return
 
@@ -688,4 +934,9 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
         'cited_experiences': cited_experiences,
         'version': version,
         'full_document': full_document,
+        # S11-10: 무엇을 어떻게 검사했는지 남긴다. 점수 하나로 통과/탈락을 가르지 않는다.
+        'plan': plan,
+        'review': review,
+        'review_error': review_error,
+        'repairs': repairs,
     }

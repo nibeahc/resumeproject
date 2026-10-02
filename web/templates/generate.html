@@ -130,8 +130,20 @@
         최신 자소서 작성 트렌드 반영
       </label>
       <p style="font-size:11px; color:#6e6e73; margin:4px 0 0 24px;">
-        references/trends/coverletter-trends.md 를 참고 자료로 함께 전달합니다 (writing-style.md/writing-rules.md 와
-        충돌하면 항상 그쪽이 우선합니다). 끄면 참고하지 않습니다.
+        <a href="/trends">references/trends/approved.md</a> 를 참고 자료로 함께 전달합니다
+        (writing-rules.md/writing-style.md 와 충돌하면 항상 그쪽이 우선합니다).
+        자동 수집본은 승인하기 전까지 전달되지 않습니다. 끄면 참고하지 않습니다.
+      </p>
+
+      <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:#1d1d1f;
+                    cursor:pointer; margin-top:10px;">
+        <input type="checkbox" id="useQualityCheck" checked>
+        논지 검토 (초안을 한 번 더 검사)
+      </label>
+      <p style="font-size:11px; color:#6e6e73; margin:4px 0 0 24px;">
+        쓰기 전에 문단별 핵심 주장을 설계하게 하고, 작성 후 별도 호출로 문장마다 역할과 근거를
+        검사합니다. 근거 없는 주장이나 논지에서 벗어난 문장이 있으면 한 번만 고쳐 쓰고,
+        그래도 남으면 알려줍니다. <strong>LLM 호출이 최대 2회에서 4회로 늘어납니다.</strong>
       </p>
     </div>
   </div>
@@ -257,6 +269,14 @@ const STAGE_LABEL = {
   draft: '초안 완료',
   retry: '글자수 보정 중...',
   selected: '경험 선택 완료',
+  plan: '논지 계획 확인',
+  reviewing: '논지 검토 중...',
+  reviewed: '검토 완료',
+  repair: '지적 반영해 수정 중...',
+  repair_rejected: '⚠️ 수정본이 다른 조건을 깨뜨려 되돌림',
+  review_failed: '⚠️ 검토 실패 (초안은 보존됨)',
+  cited_unknown: '⚠️ 제공되지 않은 경험을 인용함',
+  version_save_failed: '⚠️ 버전 기록 실패 (초안은 저장됨)',
   overrides_trimmed: '⚠️ 지정한 경험이 상한을 넘어 일부 제외됨',
   unresearched_company: '⚠️ 기업 정보 없이 진행 (동의함)',
 };
@@ -404,6 +424,7 @@ async function generate(overrideFiles, opts = {}) {
   const charLimit = document.getElementById('charLimit').value;
   const countMode = document.querySelector('input[name="countMode"]:checked').value;
   const useTrends = document.getElementById('useTrends').checked;
+  const useQualityCheck = document.getElementById('useQualityCheck').checked;
   const mode = lengthMode();
 
   if (!company || !position || !question || (mode === 'bounded' && !charLimit)) {
@@ -425,7 +446,8 @@ async function generate(overrideFiles, opts = {}) {
 
   try {
     const body = { company, position, question, char_limit: charLimit, count_mode: countMode,
-                   use_trends: useTrends, length_mode: mode };
+                   use_trends: useTrends, length_mode: mode,
+                   use_quality_check: useQualityCheck };
     if (overrideFiles && overrideFiles.length) body.experience_files = overrideFiles;
     if (opts.allowUnresearched) body.allow_unresearched = true;   // S11-1: 사용자가 명시적으로 동의한 경우에만
 
@@ -495,6 +517,13 @@ const ISSUE_LABELS = {
   unresearched_company: '기업 정보를 조사하지 않고 작성함',
   dropped_overrides: '지정한 경험 중 일부가 상한(2개)을 넘어 제외됨',
   cited_unknown_experience: '제공되지 않은 경험을 인용함',
+  plan_missing: '논지 계획을 받지 못해 구조를 검사하지 못함',
+  plan_cites_unknown_experience: '논지 계획이 제공되지 않은 경험을 가리킴',
+  second_experience_unjustified: '두 번째 경험을 쓴 이유가 설명되지 않음',
+  review_failed: '논지 검토에 실패해 검사하지 못함',
+  unsupported_claim: '근거 없이 주장한 문장이 있음',
+  new_unrelated_claim: '문단의 논지와 다른 주장이 섞임',
+  fabricated_fact: '제공된 경험에 없는 사실로 보이는 서술이 있음',
 };
 
 function issueLabel(code, data) {

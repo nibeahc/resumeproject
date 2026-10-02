@@ -39,6 +39,7 @@ outputs/[이름]/     ← 사용자별 생성 결과물
 
 - parse-experiences            : users/[이름]/raw/ → users/[이름]/experiences/ 변환 및 태깅
 - write-coverletter            : 자소서 문항 → 문단 작성 (기업 리서치 + 레퍼런스 자동 참조)
+- review-coverletter           : 작성된 초안의 문장별 역할·근거 검토 (S11-10, 별도 호출)
 - query-experiences            : 이력 조회
 - generate-interview-questions : 자소서 기반 면접 예상 질문 생성
 
