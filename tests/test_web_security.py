@@ -48,6 +48,7 @@ EXPECTED_ROUTES = {
     ('/applications/<name>/<int:job_id>/status', 'POST'),
     ('/applications/<name>/<int:job_id>/history', 'GET'),
     ('/trends', 'GET'),
+    ('/trends/approve', 'POST'),
     ('/static/<path:filename>', 'GET'),
 }
 

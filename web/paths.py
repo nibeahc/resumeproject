@@ -53,11 +53,14 @@ def trash_dir() -> Path:
     return project_root() / '_trash'
 
 
-def trends_path() -> Path:
-    """자소서 작성 트렌드 자동 리서치 결과 (고도화, 2026-09-27). 사용자별이 아니라 전역이다 —
-    company/jobs 처럼 project_root 바로 아래를 쓴다(사용자 입력이 아니므로 safe_path 를 거칠
-    필요가 없다)."""
-    return project_root() / 'references' / 'trends' / 'coverletter-trends.md'
+def trends_dir() -> Path:
+    """자소서 작성 트렌드 저장소 (고도화 2026-09-27, S11-6 에서 3단 분리).
+    사용자별이 아니라 전역이다 — company/jobs 처럼 project_root 바로 아래를 쓴다
+    (사용자 입력이 아니므로 safe_path 를 거칠 필요가 없다).
+
+    안에 raw/(수집) · approved.md(승인, 프롬프트 주입 대상) · history/ 가 있다.
+    경로 조립은 lib/trends.py 의 raw_dir() / approved_path() / history_dir() 를 쓴다."""
+    return project_root() / 'references' / 'trends'
 
 
 def safe_upload_name(raw):

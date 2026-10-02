@@ -460,9 +460,11 @@ class GenerateRouteTest(unittest.TestCase):
 
     def test_trends_document_included_in_prompt_when_present(self):
         """고도화(2026-09-27): lib/trends.py 가 조사해둔 트렌드가 자소서 프롬프트에 실린다."""
+        # S11-6: 프롬프트에 들어가는 것은 승인본(approved.md)뿐이다.
+        # raw/ 에 수집만 된 내용은 사람이 승인하기 전까지 생성에 쓰이지 않는다.
         trends_dir = self.root / 'references' / 'trends'
         trends_dir.mkdir(parents=True)
-        (trends_dir / 'coverletter-trends.md').write_text(
+        (trends_dir / 'approved.md').write_text(
             '# 자소서 작성 트렌드\n\n## 구조\n두괄식 선호', encoding='utf-8')
         fake = llm_result('===ANSWER===\n답변\n===END===\n===META===\n참조한 경험: x\n===END===\n')
         with patch.object(generate_route, 'stream_complete', return_value=fake) as m:
@@ -471,6 +473,19 @@ class GenerateRouteTest(unittest.TestCase):
         self.assertIn('두괄식 선호', prompt)
         # writing-style.md 가 우선한다는 지시가 트렌드 참고 바로 옆에 있어야 한다
         self.assertIn('writing-style.md', prompt.split('두괄식 선호')[0][-300:])
+
+    def test_unapproved_raw_trends_not_injected(self):
+        """S11-6 / 검토 F-1: 자동 수집본이 검토 없이 작성 정책이 되던 구조를 끊는다."""
+        raw = self.root / 'references' / 'trends' / 'raw'
+        raw.mkdir(parents=True)
+        (raw / '2026-09-27.md').write_text(
+            '> 최종 갱신일: 2026-09-27\n\n쉼표를 많이 쓰면 AI 티가 난다', encoding='utf-8')
+        fake = llm_result('===ANSWER===\n답변\n===END===\n===META===\nx\n===END===\n')
+        with patch.object(generate_route, 'stream_complete', return_value=fake) as m:
+            self.post().get_data()
+        prompt = m.call_args.kwargs['messages'][0]['content']
+        self.assertNotIn('AI 티가 난다', prompt)
+        self.assertIn('아직 조사된 트렌드 없음', prompt)
 
     def test_missing_trends_document_does_not_break_prompt(self):
         fake = llm_result('===ANSWER===\n답변\n===END===\n===META===\n참조한 경험: x\n===END===\n')
@@ -482,9 +497,11 @@ class GenerateRouteTest(unittest.TestCase):
 
     def test_use_trends_false_excludes_trends_from_prompt(self):
         """고도화(2026-09-28): 대시보드 '최신 트렌드 반영' 토글을 끄면 트렌드 문서를 아예 안 보낸다."""
+        # S11-6: 프롬프트에 들어가는 것은 승인본(approved.md)뿐이다.
+        # raw/ 에 수집만 된 내용은 사람이 승인하기 전까지 생성에 쓰이지 않는다.
         trends_dir = self.root / 'references' / 'trends'
         trends_dir.mkdir(parents=True)
-        (trends_dir / 'coverletter-trends.md').write_text(
+        (trends_dir / 'approved.md').write_text(
             '# 자소서 작성 트렌드\n\n## 구조\n두괄식 선호', encoding='utf-8')
         fake = llm_result('===ANSWER===\n답변\n===END===\n===META===\n참조한 경험: x\n===END===\n')
         with patch.object(generate_route, 'stream_complete', return_value=fake) as m:
@@ -495,9 +512,11 @@ class GenerateRouteTest(unittest.TestCase):
 
     def test_use_trends_defaults_true_when_omitted(self):
         """토글 값을 아예 안 보내는 기존 호출(폼 없이)도 트렌드 반영 기본값(True)을 유지해야 한다."""
+        # S11-6: 프롬프트에 들어가는 것은 승인본(approved.md)뿐이다.
+        # raw/ 에 수집만 된 내용은 사람이 승인하기 전까지 생성에 쓰이지 않는다.
         trends_dir = self.root / 'references' / 'trends'
         trends_dir.mkdir(parents=True)
-        (trends_dir / 'coverletter-trends.md').write_text(
+        (trends_dir / 'approved.md').write_text(
             '# 자소서 작성 트렌드\n\n## 구조\n두괄식 선호', encoding='utf-8')
         fake = llm_result('===ANSWER===\n답변\n===END===\n===META===\n참조한 경험: x\n===END===\n')
         with patch.object(generate_route, 'stream_complete', return_value=fake) as m:

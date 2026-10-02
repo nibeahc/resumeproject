@@ -36,7 +36,8 @@ class TrendsPageTest(unittest.TestCase):
     def test_renders_existing_trends_content(self):
         trends_dir = self.root / 'references' / 'trends'
         trends_dir.mkdir(parents=True)
-        (trends_dir / 'coverletter-trends.md').write_text(
+        # S11-6: 화면이 "현재 쓰이는 내용" 으로 보여주는 것은 승인본이다.
+        (trends_dir / 'approved.md').write_text(
             '# 자소서 작성 트렌드\n\n## 구조\n두괄식 선호', encoding='utf-8')
         r = self.c.get('/trends')
         # 고도화(2026-09-27)로 렌더링이 클라이언트 마크다운 파서로 옮겨가면서, 본문은
@@ -105,6 +106,92 @@ class BackgroundRefreshWiringTest(unittest.TestCase):
         r = c.get('/user/홍길동')
         self.assertEqual(r.status_code, 200)
         self.assertNotIn('트렌드가 업데이트됐어요'.encode('utf-8'), r.data)
+
+
+class TrendsApprovalTest(unittest.TestCase):
+    """S11-6 / 검토 F-1: 자동 수집본이 검토 없이 작성 정책이 되던 구조를 끊었는지."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.root = self.tmp / 'root'
+        self.trends_dir = self.root / 'references' / 'trends'
+        self.trends_dir.mkdir(parents=True)
+        app = create_app({'PROJECT_ROOT': self.root, 'DB_PATH': self.tmp / 'app.db', 'TESTING': True})
+        self.c = app.test_client()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def write_raw(self, body='쉼표를 많이 쓰면 AI 티가 난다'):
+        raw = self.trends_dir / 'raw'
+        raw.mkdir(parents=True, exist_ok=True)
+        (raw / '2026-09-27.md').write_text(f'> 최종 갱신일: 2026-09-27\n\n{body}', encoding='utf-8')
+
+    def test_raw_alone_is_marked_pending_and_not_in_use(self):
+        self.write_raw()
+        r = self.c.get('/trends')
+        self.assertEqual(r.status_code, 200)
+        self.assertIn('검토 대기'.encode('utf-8'), r.data)
+        self.assertIsNone(trends.load_trends(self.trends_dir))
+
+    def test_approve_promotes_raw_to_approved(self):
+        self.write_raw()
+        r = self.c.post('/trends/approve', json={})
+        self.assertEqual(r.status_code, 200)
+        approved = trends.load_trends(self.trends_dir)
+        self.assertIn('AI 티가 난다', approved)
+        self.assertIn('승인일', approved)
+
+    def test_approve_with_edited_content_wins(self):
+        """항목을 추리거나 문구를 고쳐서 승인할 수 있어야 한다."""
+        self.write_raw()
+        self.c.post('/trends/approve', json={'content': '근거 있는 수치만 포함한다'})
+        approved = trends.load_trends(self.trends_dir)
+        self.assertIn('근거 있는 수치만', approved)
+        self.assertNotIn('AI 티가 난다', approved)
+
+    def test_approve_archives_previous_version(self):
+        self.write_raw()
+        self.c.post('/trends/approve', json={'content': '1차 승인본'})
+        self.c.post('/trends/approve', json={'content': '2차 승인본'})
+        history = list((self.trends_dir / 'history').glob('*.md'))
+        self.assertEqual(len(history), 1)
+        self.assertIn('1차 승인본', history[0].read_text(encoding='utf-8'))
+        self.assertIn('2차 승인본', trends.load_trends(self.trends_dir))
+
+    def test_approve_without_anything_to_approve_fails(self):
+        r = self.c.post('/trends/approve', json={})
+        self.assertEqual(r.status_code, 400)
+
+
+class LegacyMigrationTest(unittest.TestCase):
+    """S11-6: 예전 단일 파일은 raw/ 로 옮기되 승인본으로 올리지 않는다."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.root = self.tmp / 'root'
+        self.trends_dir = self.root / 'references' / 'trends'
+        self.trends_dir.mkdir(parents=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_legacy_file_moves_to_raw_not_approved(self):
+        (self.trends_dir / 'coverletter-trends.md').write_text(
+            '> 최종 갱신일: 2026-09-27\n\n옛 수집본', encoding='utf-8')
+        create_app({'PROJECT_ROOT': self.root, 'DB_PATH': self.tmp / 'app.db', 'TESTING': True})
+        self.assertFalse((self.trends_dir / 'coverletter-trends.md').exists())
+        self.assertTrue((self.trends_dir / 'raw' / '2026-09-27.md').exists())
+        # 검토를 거친 적 없는 내용이므로 승인본이 되면 안 된다
+        self.assertIsNone(trends.load_trends(self.trends_dir))
+        self.assertTrue(trends.has_pending_review(self.trends_dir))
+
+    def test_migration_is_idempotent(self):
+        (self.trends_dir / 'coverletter-trends.md').write_text(
+            '> 최종 갱신일: 2026-09-27\n\n옛 수집본', encoding='utf-8')
+        for _ in range(3):
+            create_app({'PROJECT_ROOT': self.root, 'DB_PATH': self.tmp / 'app.db', 'TESTING': True})
+        self.assertEqual(len(list((self.trends_dir / 'raw').glob('*.md'))), 1)
 
 
 if __name__ == '__main__':

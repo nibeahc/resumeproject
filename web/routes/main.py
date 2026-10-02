@@ -6,7 +6,7 @@ from flask import Blueprint, current_app, jsonify, render_template, request
 
 from lib import applications, db, trends
 from web.data import get_experiences, get_outputs, get_raw_files, get_users
-from web.paths import output_dir, project_root, trash_dir, trends_path, user_dir, valid_segment
+from web.paths import output_dir, project_root, trash_dir, trends_dir, user_dir, valid_segment
 
 bp = Blueprint('main', __name__)
 
@@ -39,8 +39,10 @@ def user_detail(name):
     # 백그라운드 스레드에서 실제 web_search API 를 호출하게 된다(과거 스트리밍 응답 patch
     # 누락 사고와 같은 종류의 함정).
     if not current_app.config.get('TESTING'):
-        trends.trigger_background_refresh(trends_path())
-    trends_updated = trends.last_updated(trends_path())
+        trends.trigger_background_refresh(trends_dir())
+    # S11-6: 이 배너는 "언제 수집했나" 를 보여준다. 수집본이 곧바로 생성에 쓰이지는 않는다 —
+    # 승인한 것만 프롬프트에 들어간다.
+    trends_updated = trends.last_updated(trends_dir())
     trends_recent = bool(trends_updated and (date.today() - trends_updated).days <= _TRENDS_BANNER_DAYS)
 
     return render_template(

@@ -29,7 +29,7 @@ from lib.selector import MAX_EXPERIENCES
 from lib.selector import select as select_experiences
 from lib.skills import load_skill
 from web.data import get_open_jobs
-from web.paths import output_dir, project_root, safe_path, trends_path, user_dir, valid_segment
+from web.paths import output_dir, project_root, safe_path, trends_dir, user_dir, valid_segment
 
 
 def _db_path():
@@ -423,7 +423,9 @@ def coverletter_events(name, root, company, position, question, length: 'LengthS
         yield 'progress', {'stage': 'unresearched_company', 'company': company}
     # use_trends=False 면 아예 빈 문자열로 넘긴다 — build_prompt 는 빈 값일 때 이미
     # "(아직 조사된 트렌드 없음 — 무시)" 로 처리하므로 별도 분기 없이 그대로 재사용한다.
-    trends_text = (trends.load_trends(trends_path()) or '') if use_trends else ''
+    # S11-6: load_trends 는 approved.md 만 읽는다. 자동 수집본(raw/)은 사람이 승인하기
+    # 전까지 여기 들어오지 않는다.
+    trends_text = (trends.load_trends(trends_dir()) or '') if use_trends else ''
 
     ref_dir = project_root() / 'references' / 'coverletter' / position
     reference_texts = []

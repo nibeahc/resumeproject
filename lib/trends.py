@@ -143,40 +143,166 @@ def research_trends(model=None, max_uses=DEFAULT_MAX_USES) -> TrendsResult:
     return TrendsResult(ok=True, markdown=markdown, sources=sources)
 
 
-def load_trends(path: Path) -> Optional[str]:
+# ---------------------------------------------------------------------------
+# 저장소 구조 (S11-6, 설계검토 F-1)
+#
+# 예전엔 references/trends/coverletter-trends.md 한 파일이었고, 한 달에 한 번
+# 자동으로 **덮어써졌다.** 그 파일이 그대로 생성 프롬프트에 들어갔으므로, 아무도 읽지
+# 않은 검색 결과가 다음 달부터 작성 정책이 되는 구조였다. 검토 F-1 의 지적이 이것이다.
+#
+#   references/trends/
+#     raw/YYYY-MM-DD.md    수집 결과. 자동 갱신은 여기에만 쓴다
+#     approved.md          사람이 검토해 승인한 내용. **프롬프트에 들어가는 유일한 파일**
+#     history/             이전 승인본 (되돌릴 수 있게)
+#
+# 자동 갱신이 approved.md 를 건드리지 못한다는 것이 이 구조의 전부다.
+# ---------------------------------------------------------------------------
+
+_LEGACY_NAME = 'coverletter-trends.md'
+_RAW_NAME = re.compile(r'^(\d{4}-\d{2}-\d{2})\.md$')
+_APPROVED_LINE = re.compile(r'^> 승인일: (\d{4}-\d{2}-\d{2})', re.M)
+
+
+def raw_dir(base: Path) -> Path:
+    return base / 'raw'
+
+
+def approved_path(base: Path) -> Path:
+    return base / 'approved.md'
+
+
+def history_dir(base: Path) -> Path:
+    return base / 'history'
+
+
+def migrate_legacy(base: Path) -> Optional[Path]:
+    """예전의 단일 파일을 raw/ 로 옮긴다. 승인본으로 올리지는 **않는다** —
+    그 파일은 사람이 검토한 적 없는 수집 결과이고, 검토 없이 정책이 되는 것을 막는 게
+    이 변경의 목적이기 때문이다. 옮긴 경로를 돌려준다(할 일이 없으면 None).
+
+    여러 번 불러도 안전하다. create_app() 에서 한 번 부른다.
+    """
+    legacy = base / _LEGACY_NAME
+    if not legacy.exists():
+        return None
+    m = _UPDATED_LINE.search(legacy.read_text(encoding='utf-8'))
+    stamp = m.group(1) if m else date.today().isoformat()
+    target = raw_dir(base) / f'{stamp}.md'
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        legacy.unlink()          # 이미 옮긴 적이 있다
+        return target
+    legacy.rename(target)
+    return target
+
+
+def list_raw(base: Path) -> List[Path]:
+    """수집본을 최신순으로. 파일명이 YYYY-MM-DD 라 사전순 정렬이 곧 날짜순이다."""
+    d = raw_dir(base)
+    if not d.exists():
+        return []
+    return sorted((f for f in d.glob('*.md') if _RAW_NAME.match(f.name)), reverse=True)
+
+
+def latest_raw(base: Path) -> Optional[Path]:
+    files = list_raw(base)
+    return files[0] if files else None
+
+
+def load_raw(base: Path) -> Optional[str]:
+    """가장 최근 수집본. 검토 화면이 승인본과 나란히 보여준다."""
+    f = latest_raw(base)
+    return f.read_text(encoding='utf-8') if f else None
+
+
+def load_trends(base: Path) -> Optional[str]:
+    """**프롬프트에 들어가는 유일한 경로.** 승인본만 읽는다.
+    승인된 게 없으면 None 이고, build_prompt 가 "아직 조사된 트렌드 없음" 으로 처리한다.
+    """
+    path = approved_path(base)
     return path.read_text(encoding='utf-8') if path.exists() else None
 
 
-def last_updated(path: Path) -> Optional[date]:
+def last_updated(base: Path) -> Optional[date]:
+    """마지막 **수집** 일자. 자동 갱신 주기 판단에 쓴다."""
+    f = latest_raw(base)
+    if f is None:
+        return None
+    m = _UPDATED_LINE.search(f.read_text(encoding='utf-8'))
+    if m:
+        return datetime.strptime(m.group(1), '%Y-%m-%d').date()
+    name_m = _RAW_NAME.match(f.name)       # 본문 헤더가 없으면 파일명으로 되돌아간다
+    return datetime.strptime(name_m.group(1), '%Y-%m-%d').date() if name_m else None
+
+
+def last_approved(base: Path) -> Optional[date]:
+    path = approved_path(base)
     if not path.exists():
         return None
-    m = _UPDATED_LINE.search(path.read_text(encoding='utf-8'))
-    if not m:
-        return None
-    return datetime.strptime(m.group(1), '%Y-%m-%d').date()
+    m = _APPROVED_LINE.search(path.read_text(encoding='utf-8'))
+    return datetime.strptime(m.group(1), '%Y-%m-%d').date() if m else None
 
 
-def needs_refresh(path: Path, max_age_days: int = DEFAULT_MAX_AGE_DAYS) -> bool:
-    updated = last_updated(path)
+def has_pending_review(base: Path) -> bool:
+    """검토를 기다리는 수집본이 있는가 — 승인본이 없거나, 수집이 승인보다 최근이면."""
+    collected = last_updated(base)
+    if collected is None:
+        return False
+    approved = last_approved(base)
+    return approved is None or collected > approved
+
+
+def needs_refresh(base: Path, max_age_days: int = DEFAULT_MAX_AGE_DAYS) -> bool:
+    updated = last_updated(base)
     if updated is None:
         return True
     return (date.today() - updated) > timedelta(days=max_age_days)
 
 
-def save_trends(result: TrendsResult, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(result.markdown, encoding='utf-8')
+def save_trends(result: TrendsResult, base: Path) -> Path:
+    """수집 결과를 raw/ 에 남긴다. approved.md 는 건드리지 않는다 — 이게 핵심이다."""
+    target = raw_dir(base) / f'{date.today().isoformat()}.md'
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(result.markdown, encoding='utf-8')
+    return target
 
 
-def ensure_fresh(path: Path, max_age_days: int = DEFAULT_MAX_AGE_DAYS,
+def approve(base: Path, content: Optional[str] = None) -> Optional[Path]:
+    """사람이 검토한 내용을 승인본으로 올린다. content 를 안 주면 최신 수집본 전체를 쓴다
+    (항목을 추리거나 고쳤으면 그 결과를 content 로 넘긴다).
+
+    기존 승인본은 history/ 로 옮겨 되돌릴 수 있게 한다.
+    """
+    if content is None:
+        content = load_raw(base)
+    if not content or not content.strip():
+        return None
+
+    current = approved_path(base)
+    if current.exists():
+        hist = history_dir(base)
+        hist.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+        (hist / f'approved-{stamp}.md').write_text(current.read_text(encoding='utf-8'),
+                                                    encoding='utf-8')
+
+    today = date.today().isoformat()
+    if not _APPROVED_LINE.search(content):
+        content = f'> 승인일: {today}\n> 검토: 사용자\n\n{content.lstrip()}'
+    current.parent.mkdir(parents=True, exist_ok=True)
+    current.write_text(content, encoding='utf-8')
+    return current
+
+
+def ensure_fresh(base: Path, max_age_days: int = DEFAULT_MAX_AGE_DAYS,
                   max_uses: int = DEFAULT_MAX_USES, model=None) -> Optional[TrendsResult]:
     """오래됐을 때만 실제로 리서치한다(비용 통제). 갱신을 안 했으면 None 을 돌려준다 —
     "이미 최신이라 아무 것도 안 했다"와 "리서치했다"를 호출자가 구분할 수 있게."""
-    if not needs_refresh(path, max_age_days):
+    if not needs_refresh(base, max_age_days):
         return None
     result = research_trends(model=model, max_uses=max_uses)
     if result.ok:
-        save_trends(result, path)
+        save_trends(result, base)
     return result
 
 
@@ -184,7 +310,7 @@ _refresh_lock = threading.Lock()
 _refreshing = False  # 이 프로세스 안에서 지금 백그라운드 리서치가 진행 중인가
 
 
-def trigger_background_refresh(path: Path, max_age_days: int = DEFAULT_MAX_AGE_DAYS,
+def trigger_background_refresh(base: Path, max_age_days: int = DEFAULT_MAX_AGE_DAYS,
                                 max_uses: int = DEFAULT_MAX_USES, model=None) -> bool:
     """"앱 자체가 자동으로 주기적으로 검색"(사용자 요청, 2026-09-27)의 실제 구현. 오래됐으면
     페이지 로딩을 막지 않고 백그라운드 스레드에서 조용히 갱신한다.
@@ -197,10 +323,12 @@ def trigger_background_refresh(path: Path, max_age_days: int = DEFAULT_MAX_AGE_D
     (개인용 단일 프로세스를 전제하므로 이 정도로 충분하다 — 여러 프로세스가 동시에 뜨는
     배포 환경이었다면 파일 락 등이 필요했을 것).
 
+    S11-6 이후로 이 경로는 raw/ 에만 쓴다. 승인본은 사람이 올린다.
+
     반환값은 "이번 호출로 백그라운드 작업을 새로 띄웠는가" — 이미 진행 중이거나 아직
     갱신할 때가 안 됐으면 False.
     """
-    if not needs_refresh(path, max_age_days):
+    if not needs_refresh(base, max_age_days):
         return False
 
     global _refreshing
@@ -212,7 +340,7 @@ def trigger_background_refresh(path: Path, max_age_days: int = DEFAULT_MAX_AGE_D
     def worker():
         global _refreshing
         try:
-            ensure_fresh(path, max_age_days=max_age_days, max_uses=max_uses, model=model)
+            ensure_fresh(base, max_age_days=max_age_days, max_uses=max_uses, model=model)
         except Exception:  # noqa: BLE001 — 백그라운드 작업 실패로 페이지 요청을 망가뜨리지 않는다
             pass
         finally:

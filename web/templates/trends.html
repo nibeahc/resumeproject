@@ -3,14 +3,15 @@
 
 {% block content %}
 <style>
-  #trendsContent h1, #trendsContent h2, #trendsContent h3 { margin-top:20px; margin-bottom:10px; }
-  #trendsContent h1:first-child, #trendsContent h2:first-child { margin-top:0; }
-  #trendsContent p { margin-bottom:10px; line-height:1.8; }
-  #trendsContent ul, #trendsContent ol { margin:0 0 10px 22px; line-height:1.8; }
-  #trendsContent blockquote { border-left:3px solid var(--rule); padding-left:12px; color:var(--ink-soft);
-                               margin:0 0 10px; font-size:13px; }
-  #trendsContent hr { border:none; border-top:1px solid var(--rule); margin:16px 0; }
-  #trendsContent table { margin-bottom:10px; }
+  .trendsBody h1, .trendsBody h2, .trendsBody h3 { margin-top:20px; margin-bottom:10px; }
+  .trendsBody h1:first-child, .trendsBody h2:first-child { margin-top:0; }
+  .trendsBody p { margin-bottom:10px; line-height:1.8; }
+  .trendsBody ul, .trendsBody ol { margin:0 0 10px 22px; line-height:1.8; }
+  .trendsBody blockquote { border-left:3px solid var(--rule); padding-left:12px; color:var(--ink-soft);
+                           margin:0 0 10px; font-size:13px; }
+  .trendsBody hr { border:none; border-top:1px solid var(--rule); margin:16px 0; }
+  .trendsBody table { margin-bottom:10px; }
+  .trendsTag { font-size:11px; padding:2px 8px; border-radius:10px; }
 </style>
 
 <div style="margin-bottom:20px; font-size:13px; color:var(--ink-soft);">
@@ -21,13 +22,51 @@
 
 <h1 style="margin-bottom:8px;">자소서 작성 트렌드</h1>
 <p style="color:var(--ink-soft); font-size:13px; margin-bottom:20px;">
-  Anthropic web_search 도구로 한 달에 한 번 자동 조사됩니다. 자소서 생성 시 참고용으로만
-  쓰이고, 사용자의 writing-style.md/writing-rules.md 가 항상 우선합니다.
+  Anthropic web_search 도구가 한 달에 한 번 자동으로 조사합니다. 조사 결과는 바로 쓰이지 않습니다 —
+  아래에서 <strong>승인한 내용만</strong> 자소서 생성에 참고 자료로 전달되고, 그 경우에도
+  writing-rules.md 와 writing-style.md 가 항상 우선합니다.
 </p>
 
+<!-- 승인본: 실제로 생성에 쓰이는 것 -->
 <div class="card">
+  <div style="display:flex; align-items:center; gap:8px; margin-bottom:12px;">
+    <h2 style="margin:0; font-size:15px;">승인본</h2>
+    <span class="trendsTag" style="background:#d1e7dd; color:#0f5132;">생성에 사용 중</span>
+    {% if approved_at %}
+    <span style="font-size:12px; color:var(--ink-soft);">승인 {{ approved_at }}</span>
+    {% endif %}
+  </div>
   {% if content %}
-  <div id="trendsContent" style="font-size:14px;"></div>
+  <div id="approvedContent" class="trendsBody" style="font-size:14px;"></div>
+  {% else %}
+  <p class="empty">승인한 내용이 없습니다. 승인 전까지 자소서 생성에 트렌드가 전달되지 않습니다.</p>
+  {% endif %}
+</div>
+
+<!-- 수집본: 아직 검토 전 -->
+<div class="card">
+  <div style="display:flex; align-items:center; gap:8px; margin-bottom:12px;">
+    <h2 style="margin:0; font-size:15px;">최근 수집본</h2>
+    {% if pending %}
+    <span class="trendsTag" style="background:#fff3cd; color:#664d03;">검토 대기</span>
+    {% endif %}
+    {% if collected_at %}
+    <span style="font-size:12px; color:var(--ink-soft);">수집 {{ collected_at }}</span>
+    {% endif %}
+  </div>
+
+  {% if raw_content %}
+  <p style="font-size:12px; color:var(--ink-soft); margin-bottom:12px;">
+    검증되지 않은 검색 결과입니다. 출처와 근거를 확인하고, 필요한 항목만 남겨서 승인하세요.
+    "수치를 반드시 포함하라" 같은 강한 권고는 "근거 있고 논지에 필요한 수치만 포함하라" 정도로
+    낮추는 편이 안전합니다.
+  </p>
+  <textarea id="rawEditor" class="form-input" rows="18"
+            style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; line-height:1.6;">{{ raw_content }}</textarea>
+  <div style="margin-top:12px;">
+    <button class="btn" onclick="approveTrends()">이 내용으로 승인</button>
+    <span id="approveMsg" style="margin-left:10px; font-size:12px; color:var(--ink-soft);"></span>
+  </div>
   {% else %}
   <p class="empty">아직 조사된 트렌드가 없습니다. 사용자 페이지를 한 번 열면 백그라운드에서
     자동으로 조사가 시작됩니다(완료까지 다소 시간이 걸릴 수 있습니다).</p>
@@ -37,9 +76,26 @@
 
 {% block scripts %}
 <script src="/static/markdown.js"></script>
-{% if content %}
 <script>
-document.getElementById('trendsContent').innerHTML = renderMarkdown({{ content|tojson }});
-</script>
+{% if content %}
+document.getElementById('approvedContent').innerHTML = renderMarkdown({{ content|tojson }});
 {% endif %}
+
+async function approveTrends() {
+  const msg = document.getElementById('approveMsg');
+  msg.textContent = '승인 중...';
+  try {
+    const res = await fetch('/trends/approve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: document.getElementById('rawEditor').value }),
+    });
+    const data = await res.json();
+    if (!data.success) { msg.textContent = data.error || '승인에 실패했습니다.'; return; }
+    location.reload();
+  } catch (e) {
+    msg.textContent = '승인 중 오류가 발생했습니다: ' + e.message;
+  }
+}
+</script>
 {% endblock %}

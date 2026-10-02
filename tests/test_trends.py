@@ -115,37 +115,53 @@ class StripLeadingNarrationTest(unittest.TestCase):
         self.assertEqual(trends._strip_leading_narration(body), body)
 
 
+def write_raw(base: Path, datestr: str, body: str = '내용') -> Path:
+    """S11-6: 수집본은 references/trends/raw/YYYY-MM-DD.md 에 쌓인다."""
+    d = base / 'raw'
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / f'{datestr}.md'
+    f.write_text(f'> 최종 갱신일: {datestr}\n\n{body}', encoding='utf-8')
+    return f
+
+
 class FreshnessTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
-        self.path = self.tmp / 'trends.md'
+        self.base = self.tmp
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_missing_file_needs_refresh(self):
-        self.assertTrue(trends.needs_refresh(self.path))
-        self.assertIsNone(trends.last_updated(self.path))
+        self.assertTrue(trends.needs_refresh(self.base))
+        self.assertIsNone(trends.last_updated(self.base))
 
     def test_recent_file_does_not_need_refresh(self):
-        today = date.today().strftime('%Y-%m-%d')
-        self.path.write_text(f'> 최종 갱신일: {today}\n\n내용', encoding='utf-8')
-        self.assertFalse(trends.needs_refresh(self.path))
-        self.assertEqual(trends.last_updated(self.path), date.today())
+        write_raw(self.base, date.today().strftime('%Y-%m-%d'))
+        self.assertFalse(trends.needs_refresh(self.base))
+        self.assertEqual(trends.last_updated(self.base), date.today())
 
     def test_old_file_needs_refresh(self):
-        old = (date.today() - timedelta(days=40)).strftime('%Y-%m-%d')
-        self.path.write_text(f'> 최종 갱신일: {old}\n\n내용', encoding='utf-8')
-        self.assertTrue(trends.needs_refresh(self.path, max_age_days=30))
+        write_raw(self.base, (date.today() - timedelta(days=40)).strftime('%Y-%m-%d'))
+        self.assertTrue(trends.needs_refresh(self.base, max_age_days=30))
 
     def test_exactly_at_boundary_does_not_need_refresh(self):
-        boundary = (date.today() - timedelta(days=30)).strftime('%Y-%m-%d')
-        self.path.write_text(f'> 최종 갱신일: {boundary}\n\n내용', encoding='utf-8')
-        self.assertFalse(trends.needs_refresh(self.path, max_age_days=30))
+        write_raw(self.base, (date.today() - timedelta(days=30)).strftime('%Y-%m-%d'))
+        self.assertFalse(trends.needs_refresh(self.base, max_age_days=30))
 
-    def test_malformed_date_treated_as_missing(self):
-        self.path.write_text('내용만 있고 갱신일 줄이 없음', encoding='utf-8')
-        self.assertTrue(trends.needs_refresh(self.path))
+    def test_malformed_date_falls_back_to_filename(self):
+        """S11-6: 본문 헤더가 없어도 파일명이 날짜라 수집 시점을 알 수 있다."""
+        old = (date.today() - timedelta(days=40)).strftime('%Y-%m-%d')
+        d = self.base / 'raw'
+        d.mkdir(parents=True)
+        (d / f'{old}.md').write_text('갱신일 줄이 없음', encoding='utf-8')
+        self.assertEqual(trends.last_updated(self.base), date.today() - timedelta(days=40))
+        self.assertTrue(trends.needs_refresh(self.base, max_age_days=30))
+
+    def test_latest_raw_wins(self):
+        write_raw(self.base, '2026-01-01', '옛날')
+        write_raw(self.base, '2026-09-01', '최신')
+        self.assertIn('최신', trends.load_raw(self.base))
 
 
 class ResearchTrendsTest(unittest.TestCase):
@@ -209,36 +225,44 @@ class ResearchTrendsTest(unittest.TestCase):
 class EnsureFreshTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
-        self.path = self.tmp / 'trends.md'
+        self.base = self.tmp
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_skips_api_call_when_already_fresh(self):
-        today = date.today().strftime('%Y-%m-%d')
-        self.path.write_text(f'> 최종 갱신일: {today}\n\n내용', encoding='utf-8')
+        write_raw(self.base, date.today().strftime('%Y-%m-%d'))
         with patch.object(trends, 'research_trends') as rt:
-            result = trends.ensure_fresh(self.path)
+            result = trends.ensure_fresh(self.base)
         rt.assert_not_called()
         self.assertIsNone(result)
 
     def test_calls_api_and_saves_when_stale(self):
-        old = (date.today() - timedelta(days=100)).strftime('%Y-%m-%d')
-        self.path.write_text(f'> 최종 갱신일: {old}\n\n낡은 내용', encoding='utf-8')
+        write_raw(self.base, (date.today() - timedelta(days=100)).strftime('%Y-%m-%d'), '낡은 내용')
         with patch.object(trends, 'research_trends',
                           return_value=trends.TrendsResult(ok=True, markdown='새 문서 내용')) as rt:
-            result = trends.ensure_fresh(self.path)
+            result = trends.ensure_fresh(self.base)
         rt.assert_called_once()
         self.assertTrue(result.ok)
-        self.assertEqual(self.path.read_text(encoding='utf-8'), '새 문서 내용')
+        self.assertEqual(trends.load_raw(self.base), '새 문서 내용')
+
+    def test_auto_refresh_never_touches_approved(self):
+        """S11-6 의 핵심. 자동 갱신이 승인본을 바꾸면 안 된다 — 검토 F-1 이 지적한 구조다."""
+        write_raw(self.base, (date.today() - timedelta(days=100)).strftime('%Y-%m-%d'), '낡은 수집본')
+        trends.approve(self.base, '사람이 승인한 내용')
+        with patch.object(trends, 'research_trends',
+                          return_value=trends.TrendsResult(ok=True, markdown='새로 수집한 내용')):
+            trends.ensure_fresh(self.base)
+        self.assertIn('새로 수집한 내용', trends.load_raw(self.base))
+        self.assertIn('사람이 승인한 내용', trends.load_trends(self.base))
+        self.assertNotIn('새로 수집한 내용', trends.load_trends(self.base))
 
     def test_failed_research_does_not_overwrite_existing_file(self):
-        old = (date.today() - timedelta(days=100)).strftime('%Y-%m-%d')
-        self.path.write_text(f'> 최종 갱신일: {old}\n\n낡은 내용', encoding='utf-8')
+        write_raw(self.base, (date.today() - timedelta(days=100)).strftime('%Y-%m-%d'), '낡은 내용')
         with patch.object(trends, 'research_trends',
                           return_value=trends.TrendsResult(ok=False, error='실패')):
-            trends.ensure_fresh(self.path)
-        self.assertIn('낡은 내용', self.path.read_text(encoding='utf-8'))
+            trends.ensure_fresh(self.base)
+        self.assertIn('낡은 내용', trends.load_raw(self.base))
 
 
 class TriggerBackgroundRefreshTest(unittest.TestCase):
@@ -246,7 +270,7 @@ class TriggerBackgroundRefreshTest(unittest.TestCase):
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
-        self.path = self.tmp / 'trends.md'
+        self.base = self.tmp
         trends._refreshing = False  # 다른 테스트가 남긴 상태를 초기화
 
     def tearDown(self):
@@ -254,10 +278,9 @@ class TriggerBackgroundRefreshTest(unittest.TestCase):
         trends._refreshing = False
 
     def test_returns_false_and_skips_api_when_already_fresh(self):
-        today = date.today().strftime('%Y-%m-%d')
-        self.path.write_text(f'> 최종 갱신일: {today}\n\n내용', encoding='utf-8')
+        write_raw(self.base, date.today().strftime('%Y-%m-%d'))
         with patch.object(trends, 'ensure_fresh') as ef:
-            started = trends.trigger_background_refresh(self.path)
+            started = trends.trigger_background_refresh(self.base)
         self.assertFalse(started)
         ef.assert_not_called()
 
@@ -269,10 +292,10 @@ class TriggerBackgroundRefreshTest(unittest.TestCase):
             return None
 
         with patch.object(trends, 'ensure_fresh', side_effect=slow_ensure_fresh) as ef:
-            started = trends.trigger_background_refresh(self.path)
+            started = trends.trigger_background_refresh(self.base)
             self.assertTrue(started)
             # 진행 중일 때 페이지를 또 열어도(=또 호출해도) API 를 중복 호출하지 않는다
-            started_again = trends.trigger_background_refresh(self.path)
+            started_again = trends.trigger_background_refresh(self.base)
             self.assertFalse(started_again)
             release.set()
 
@@ -285,7 +308,7 @@ class TriggerBackgroundRefreshTest(unittest.TestCase):
 
     def test_does_not_crash_request_when_background_research_fails(self):
         with patch.object(trends, 'ensure_fresh', side_effect=RuntimeError('네트워크 오류')):
-            started = trends.trigger_background_refresh(self.path)
+            started = trends.trigger_background_refresh(self.base)
             self.assertTrue(started)
             for _ in range(40):
                 if not trends._refreshing:

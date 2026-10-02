@@ -23,4 +23,14 @@ def create_app(config=None):
 
     from web.routes import register_blueprints
     register_blueprints(app)
+
+    # S11-6: 예전의 단일 파일(references/trends/coverletter-trends.md)을 raw/ 로 옮긴다.
+    # 승인본으로 올리지는 않는다 — 검토를 거치지 않은 수집 결과이기 때문이다.
+    # 여러 번 불러도 안전하고, 옮길 게 없으면 아무 일도 하지 않는다.
+    from lib import trends as _trends
+    try:
+        _trends.migrate_legacy(app.config['PROJECT_ROOT'] / 'references' / 'trends')
+    except OSError:
+        pass  # 마이그레이션 실패로 앱 기동을 막지 않는다
+
     return app
