@@ -173,6 +173,13 @@ class GenerateRouteTest(unittest.TestCase):
             '# 다른 경험\n\n## 메타\n\n- 카테고리: 전문성·직무역량\n- 키워드: 데이터분석\n\n다른 내용입니다', encoding='utf-8')
         (u / 'profile.md').write_text('프로필', encoding='utf-8')
         (self.root / 'outputs' / '홍길동').mkdir(parents=True)
+        # S11-1: 기업 자료가 없으면 생성이 막힌다(그게 요점이다). 이 클래스의 테스트들은
+        # 글자수·경험 선택을 보는 것이므로 조사가 끝난 상태를 기본 전제로 깐다.
+        # 게이트 자체는 CompanyResearchGateTest 가 본다.
+        self.companies = self.root / 'companies'
+        self.companies.mkdir(parents=True)
+        (self.companies / '테스트기업.md').write_text('# 테스트기업\n\n핵심가치: 정확성',
+                                                      encoding='utf-8')
         app = create_app({'PROJECT_ROOT': self.root, 'TESTING': True})
         self.c = app.test_client()
 
@@ -254,6 +261,46 @@ class GenerateRouteTest(unittest.TestCase):
         self.assertIn('"exceeded": true', body)
         saved = (self.root / 'outputs' / '홍길동' / '테스트기업_테스트직무' / '자소서.md').read_text(encoding='utf-8')
         self.assertIn('⚠️ 글자수 초과', saved)  # 저장은 하되 숨기지 않고 경고를 남긴다
+
+    def test_missing_company_file_blocks_generation(self):
+        """S11-1 / 검토 0.1: 예전엔 캐시가 없으면 프롬프트가 "학습 데이터로 추론하라" 고
+        지시했다. 이 레포엔 companies/*.md 를 쓰는 코드 경로가 아예 없어서(수작업 파일)
+        캐시 미스가 기본값에 가까웠다."""
+        (self.companies / '테스트기업.md').unlink()
+        with patch.object(generate_route, 'stream_complete') as m:
+            body = self.post().get_data(as_text=True)
+        m.assert_not_called()
+        self.assertIn('"needs_input": "company_research"', body)
+
+    def test_allow_unresearched_proceeds_but_flags(self):
+        """동의하면 쓰되, ready 로 올리지 않고 파일에도 흔적을 남긴다."""
+        (self.companies / '테스트기업.md').unlink()
+        fake = llm_result('===ANSWER===\n' + '가' * 97 + '\n===END===\n===META===\nx\n===END===\n')
+        with patch.object(generate_route, 'stream_complete', return_value=fake) as m:
+            body = self.post(allow_unresearched=True).get_data(as_text=True)
+        self.assertEqual(m.call_count, 1)
+        self.assertIn('"status": "review_required"', body)
+        self.assertIn('"unresearched_company"', body)
+        saved = (self.root / 'outputs' / '홍길동' / '테스트기업_테스트직무' / '자소서.md').read_text(encoding='utf-8')
+        self.assertIn('⚠️ 기업 정보 미조사', saved)
+
+    def test_degraded_prompt_forbids_inventing_company_facts(self):
+        """열화 모드 프롬프트가 "추론해서 써라" 가 아니라 "쓰지 마라" 여야 한다."""
+        (self.companies / '테스트기업.md').unlink()
+        fake = llm_result('===ANSWER===\n' + '가' * 97 + '\n===END===\n===META===\nx\n===END===\n')
+        with patch.object(generate_route, 'stream_complete', return_value=fake) as m:
+            self.post(allow_unresearched=True).get_data()
+        sent = m.call_args.kwargs['messages'][0]['content']
+        self.assertIn('단 하나도 쓰지 마세요', sent)
+        self.assertNotIn('학습 데이터', sent)
+
+    def test_researched_company_is_ready(self):
+        fake = llm_result('===ANSWER===\n' + '가' * 97 + '\n===END===\n===META===\nx\n===END===\n')
+        with patch.object(generate_route, 'stream_complete', return_value=fake) as m:
+            body = self.post().get_data(as_text=True)
+        sent = m.call_args.kwargs['messages'][0]['content']
+        self.assertIn('핵심가치: 정확성', sent)
+        self.assertIn('"status": "ready_for_user"', body)
 
     def test_unknown_override_file_rejected(self):
         """S11-2: 오타난 파일명이 섞이면 조용히 빼고 쓰지 말고 멈춰야 한다."""
@@ -455,6 +502,9 @@ class GenerateBundleTest(unittest.TestCase):
             '# 테스트 경험\n\n## 메타\n\n- 카테고리: 리더십\n\n### Result (결과)\n\n성과를 냈다.',
             encoding='utf-8')
         (self.root / 'outputs' / '홍길동').mkdir(parents=True)
+        (self.root / 'companies').mkdir(parents=True)   # S11-1: 위와 같은 이유
+        (self.root / 'companies' / '테스트기업.md').write_text('# 테스트기업\n\n핵심가치: 정확성',
+                                                               encoding='utf-8')
         db.init_db(self.db_path)
         self.db = db
         conn = db.get_conn(self.db_path)

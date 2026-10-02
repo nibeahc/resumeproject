@@ -65,6 +65,7 @@ STATUS_REVIEW_REQUIRED = 'review_required'  # 저장은 됐지만 사람이 봐�
 ISSUE_OVER_LIMIT = 'over_limit'
 ISSUE_UNDERSHOOT = 'undershoot'
 ISSUE_DROPPED_OVERRIDES = 'dropped_overrides'
+ISSUE_UNRESEARCHED_COMPANY = 'unresearched_company'
 
 
 def count_chars(text, count_mode):
@@ -127,11 +128,19 @@ def build_prompt(name, company, position, question, char_limit, count_mode,
     exp_dump = '\n\n'.join(f'--- users/{name}/experiences/{fn} ---\n{text}' for fn, text in selected_experiences)
     ref_dump = ('\n\n'.join(f'--- {fn} ---\n{text}' for fn, text in reference_texts)
                 if reference_texts else '(로컬 레퍼런스 없음. MCP 는 이 환경에 연결되어 있지 않으므로 Step 4 는 생략)')
+    # S11-1: 캐시가 없을 때 "학습 데이터 기반 일반 정보만 참고하라" 고 지시하던 것을 지웠다.
+    # 그건 모델에게 기업 사실을 추론하라는 허가였고, 검토 0.1 이 지적한 우회 경로였다.
+    # 이 분기에 도달했다는 것은 사용자가 "기업 정보 없이 작성" 에 명시적으로 동의했다는 뜻이다.
+    # 그래도 없는 사실을 만들어 쓰게 두지는 않는다 — 쓸 수 있는 범위를 좁힌다.
     company_note = (
         f'--- companies/{company}.md ---\n{company_text}'
         if company_text.strip()
-        else f'companies/{company}.md 캐시가 없습니다. MCP 가 연결되어 있지 않으므로 Step 2 지시대로 '
-             '학습 데이터 기반 일반 정보만 참고하고, 과도하게 구체적인 최신 수치·뉴스는 인용하지 마세요.'
+        else f'companies/{company}.md 가 없습니다. 이 기업에 대해 **검증된 자료가 하나도 없는 상태**입니다.\n'
+             f'- 기업 고유의 사실(매출·규모·연혁·뉴스·수상·인물 발언·슬로건·인재상·핵심가치)을 '
+             f'**단 하나도 쓰지 마세요.** 알고 있다고 생각되는 내용도 쓰지 마세요.\n'
+             f'- 기업이나 업계에 대한 서술이 필요하면 아래 [지원 공고] 에 실제로 적힌 내용만 쓰세요.\n'
+             f'- "{company}" 라는 이름은 써도 되지만, 그 기업이 어떤 곳인지 설명하지 마세요.\n'
+             f'- 지원동기는 기업 칭찬이 아니라 **직무 자체에 대한 관심과 본인 경험의 연결**로 쓰세요.'
     )
     rules_note = strip_placeholder_rules(rules_text) or '(비어 있음 — 적용할 규칙 없음, 무시)'
     count_desc = '공백 포함' if count_mode == '포함' else '공백 제외'
@@ -255,13 +264,17 @@ def sse(event, data):
     return f'event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n'
 
 
-def _parse_use_trends(data):
-    """폼(문자열 'true'/'false'/'on')과 JSON(bool) 양쪽에서 와도 되게 관대하게 받는다.
-    안 보내면 기본값은 True(트렌드 반영) — 기존 동작(항상 반영)과 호환된다."""
-    raw = data.get('use_trends', True)
+def _parse_bool(data, key, default):
+    """폼(문자열 'true'/'false'/'on')과 JSON(bool) 양쪽에서 와도 되게 관대하게 받는다."""
+    raw = data.get(key, default)
     if isinstance(raw, str):
         return raw.strip().lower() not in ('false', '0', '')
     return bool(raw)
+
+
+def _parse_use_trends(data):
+    """안 보내면 기본값은 True(트렌드 반영) — 기존 동작(항상 반영)과 호환된다."""
+    return _parse_bool(data, 'use_trends', default=True)
 
 
 def _validate_generate_params(data):
@@ -300,12 +313,17 @@ def _validate_generate_params(data):
         override_files = [f.strip() for f in override_files.split(',') if f.strip()]
 
     use_trends = _parse_use_trends(data)
+    # S11-1: 기업 자료 없이 쓰겠다는 사용자의 명시적 동의. 기본값은 False 다 —
+    # 동의 없이 추론으로 채우는 것이 검토 0.1 의 핵심 지적이었다.
+    allow_unresearched = _parse_bool(data, 'allow_unresearched', default=False)
 
-    return errors, company, position, question, char_limit, count_mode, override_files, use_trends
+    return (errors, company, position, question, char_limit, count_mode, override_files,
+            use_trends, allow_unresearched)
 
 
 def coverletter_events(name, root, company, position, question, char_limit, count_mode,
-                        override_files=None, folder_name=None, use_trends=True):
+                        override_files=None, folder_name=None, use_trends=True,
+                        allow_unresearched_company=False):
     """자소서 한 문항을 생성해 저장하고, (event, data) 튜플을 yield 하는 순수 제너레이터.
 
     /generate/<name> (단독 생성)과 /generate/<name>/bundle (S7-3 공고 연동 일괄 생성) 양쪽에서
@@ -331,6 +349,23 @@ def coverletter_events(name, root, company, position, question, char_limit, coun
     rules_text = read_if_exists(root / 'writing-rules.md')
     interest_text = read_if_exists(root / '관심직무.md')
     company_text = read_if_exists(project_root() / 'companies' / f'{company}.md')
+
+    # S11-1: 기업 자료 게이트. 예전에는 캐시가 없어도 company_cached: False 를 progress 로
+    # 흘릴 뿐 아무도 막지 않았고, 프롬프트가 오히려 "학습 데이터로 추론하라" 고 지시했다.
+    # 이 레포에는 companies/*.md 를 **쓰는 코드 경로가 없어서**(수작업 파일이다) 캐시 미스가
+    # 기본값에 가깝다 — 그래서 조용한 열화가 아니라 멈춤이어야 한다.
+    if not company_text.strip():
+        if not allow_unresearched_company:
+            yield 'error', {
+                'message': f'companies/{company}.md 가 없습니다. 기업 자료 없이 쓰면 '
+                           f'사실관계를 지어낼 위험이 큽니다. 기업 조사를 먼저 하거나, '
+                           f'공고 내용만으로 작성하는 데 동의해 주세요.',
+                'needs_input': 'company_research',
+                'company': company,
+            }
+            return
+        issues.append(ISSUE_UNRESEARCHED_COMPANY)
+        yield 'progress', {'stage': 'unresearched_company', 'company': company}
     # use_trends=False 면 아예 빈 문자열로 넘긴다 — build_prompt 는 빈 값일 때 이미
     # "(아직 조사된 트렌드 없음 — 무시)" 로 처리하므로 별도 분기 없이 그대로 재사용한다.
     trends_text = (trends.load_trends(trends_path()) or '') if use_trends else ''
@@ -463,8 +498,13 @@ def coverletter_events(name, root, company, position, question, char_limit, coun
     out_path.parent.mkdir(parents=True, exist_ok=True)
     today = __import__('datetime').date.today().strftime('%Y.%m.%d')
     exceeded_note = f'\n⚠️ 글자수 초과: {actual}자 (제한 {char_limit}자, {actual - char_limit}자 초과, 재시도 {retries}회 후에도 초과)\n' if exceeded else ''
+    # S11-1: 열화 모드로 쓴 글은 파일에도 흔적을 남긴다. 나중에 이 파일만 열어본 사람이
+    # 기업 근거가 없는 초안이라는 걸 알 수 있어야 한다.
+    unresearched_note = (f'\n⚠️ 기업 정보 미조사: companies/{company}.md 없이 사용자 동의 하에 작성됨. '
+                         f'기업 관련 서술을 반드시 직접 확인하세요.\n'
+                         if ISSUE_UNRESEARCHED_COMPANY in issues else '')
     entry = f"""## {question}
-글자수: {actual}자 ({'공백 포함' if count_mode == '포함' else '공백 제외'}, 목표 {char_limit}자){exceeded_note}
+글자수: {actual}자 ({'공백 포함' if count_mode == '포함' else '공백 제외'}, 목표 {char_limit}자){exceeded_note}{unresearched_note}
 
 {answer}
 
@@ -502,8 +542,8 @@ def coverletter_events(name, root, company, position, question, char_limit, coun
 def generate(name):
     root = user_dir(name)
     data = request.get_json(silent=True) or request.form
-    errors, company, position, question, char_limit, count_mode, override_files, use_trends = \
-        _validate_generate_params(data)
+    (errors, company, position, question, char_limit, count_mode, override_files,
+     use_trends, allow_unresearched) = _validate_generate_params(data)
 
     if errors:
         def bad():
@@ -513,7 +553,8 @@ def generate(name):
     def stream():
         for event, ev_data in coverletter_events(name, root, company, position, question,
                                                   char_limit, count_mode, override_files,
-                                                  use_trends=use_trends):
+                                                  use_trends=use_trends,
+                                                  allow_unresearched_company=allow_unresearched):
             yield sse(event, ev_data)
 
     return Response(stream_with_context(stream()), mimetype='text/event-stream')
@@ -534,7 +575,8 @@ def generate_bundle(name):
     if not job_id_raw.isdigit():
         return jsonify(success=False, error='공고를 선택해주세요.'), 400
 
-    errors, _, _, question, char_limit, count_mode, override_files, use_trends = _validate_generate_params(
+    (errors, _, _, question, char_limit, count_mode, override_files,
+     use_trends, allow_unresearched) = _validate_generate_params(
         {**data, 'company': 'x', 'position': 'x'})  # company/position 은 공고에서 가져오므로 폼 값 검증은 건너뜀
     errors = [e for e in errors if '기업명' not in e and '직무명' not in e]
     if errors:
@@ -588,7 +630,8 @@ def generate_bundle(name):
         coverletter_status, coverletter_issues = None, []
         for event, ev_data in coverletter_events(name, root, company, position, question, char_limit,
                                                   count_mode, override_files, folder_name=folder_name,
-                                                  use_trends=use_trends):
+                                                  use_trends=use_trends,
+                                                  allow_unresearched_company=allow_unresearched):
             tagged = dict(ev_data)
             tagged['doc'] = 'coverletter'
             if event == 'done':

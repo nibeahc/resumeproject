@@ -165,6 +165,20 @@
   </div>
 </div>
 
+<!-- S11-1: 기업 자료가 없으면 생성을 멈추고 여기서 선택을 받는다.
+     토스트로 흘리면 사용자가 "왜 안 나오지" 하고 같은 버튼을 다시 누르게 된다. -->
+<div class="card" id="companyGateCard" style="display:none; background:#fff3cd; border-color:#ffe69c;">
+  <h2 style="margin:0 0 8px; font-size:15px; color:#664d03;">기업 정보가 없습니다</h2>
+  <p style="font-size:13px; color:#664d03; margin:0 0 12px;" id="companyGateText"></p>
+  <p style="font-size:12px; color:#664d03; margin:0 0 12px;">
+    기업 자료 없이 쓰면 모델이 기업 사실을 지어낼 위험이 큽니다. 권장하는 순서는
+    <code>companies/[기업명].md</code> 를 먼저 만드는 것입니다.
+    그대로 진행하면 기업 고유의 사실은 한 줄도 쓰지 않고, 공고에 적힌 내용만으로 작성합니다.
+  </p>
+  <button class="btn" id="companyGateProceed">기업 정보 없이 작성 (품질 저하)</button>
+  <button class="btn btn-secondary" id="companyGateCancel">취소</button>
+</div>
+
 <div id="resultBox">
   <div class="card" id="warnCard" style="display:none; background:#f8d7da; border-color:#f1aeb5;">
     <p style="font-size:13px; color:#842029;" id="warnText"></p>
@@ -234,6 +248,8 @@ const STAGE_LABEL = {
   draft: '초안 완료',
   retry: '글자수 보정 중...',
   selected: '경험 선택 완료',
+  overrides_trimmed: '⚠️ 지정한 경험이 상한을 넘어 일부 제외됨',
+  unresearched_company: '⚠️ 기업 정보 없이 진행 (동의함)',
 };
 
 let lastSelection = null;   // 마지막 'selected' 진행 이벤트 (question_type, selected, candidates)
@@ -360,7 +376,7 @@ async function generateBundle() {
   }
 }
 
-async function generate(overrideFiles) {
+async function generate(overrideFiles, opts = {}) {
   const company = document.getElementById('company').value.trim();
   const position = document.getElementById('position').value.trim();
   const question = document.getElementById('question').value.trim();
@@ -380,6 +396,7 @@ async function generate(overrideFiles) {
   document.getElementById('progressBox').style.display = '';
   document.getElementById('resultBox').style.display = 'none';
   document.getElementById('candidatesBox').style.display = 'none';
+  document.getElementById('companyGateCard').style.display = 'none';
   document.getElementById('progressLog').innerHTML = '';
   document.getElementById('spinner').style.display = '';
   document.getElementById('progressTitle').textContent = overrideFiles ? '재생성 중...' : '생성 중...';
@@ -387,6 +404,7 @@ async function generate(overrideFiles) {
   try {
     const body = { company, position, question, char_limit: charLimit, count_mode: countMode, use_trends: useTrends };
     if (overrideFiles && overrideFiles.length) body.experience_files = overrideFiles;
+    if (opts.allowUnresearched) body.allow_unresearched = true;   // S11-1: 사용자가 명시적으로 동의한 경우에만
 
     const res = await fetch('/generate/{{ user }}', {
       method: 'POST',
@@ -394,7 +412,7 @@ async function generate(overrideFiles) {
       body: JSON.stringify(body),
     });
 
-    let doneData = null, errorMsg = null;
+    let doneData = null, errorMsg = null, errorData = null;
     await consumeSSE(res, (ev, data) => {
       if (ev === 'progress') {
         const label = STAGE_LABEL[data.stage] || data.stage;
@@ -409,6 +427,7 @@ async function generate(overrideFiles) {
         doneData = data;
       } else if (ev === 'error') {
         errorMsg = data.message;
+        errorData = data;
       }
     });
 
@@ -416,6 +435,10 @@ async function generate(overrideFiles) {
     if (regenBtn) regenBtn.disabled = false;
     document.getElementById('progressBox').style.display = 'none';
 
+    if (errorData && errorData.needs_input === 'company_research') {
+      showCompanyGate(errorData, overrideFiles);
+      return;
+    }
     if (errorMsg) {
       toast(errorMsg, 4000);
       return;
@@ -459,6 +482,19 @@ function issueLabel(code, data) {
     return `목표 글자수보다 ${data.limit - data.chars}자 모자람`;
   }
   return ISSUE_LABELS[code] || code;
+}
+
+// S11-1: 기업 자료 없이 쓸지 사용자가 한 번 고르게 한다.
+function showCompanyGate(errorData, overrideFiles) {
+  const card = document.getElementById('companyGateCard');
+  document.getElementById('companyGateText').textContent =
+    `companies/${errorData.company}.md 가 없습니다. 이 기업에 대해 검증된 자료가 하나도 없는 상태입니다.`;
+  card.style.display = '';
+  document.getElementById('companyGateProceed').onclick = () => {
+    card.style.display = 'none';
+    generate(overrideFiles, { allowUnresearched: true });
+  };
+  document.getElementById('companyGateCancel').onclick = () => { card.style.display = 'none'; };
 }
 
 function showResult(question, data) {
