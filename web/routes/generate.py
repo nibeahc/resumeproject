@@ -73,6 +73,52 @@ def read_if_exists(path: Path):
     return path.read_text(encoding='utf-8') if path.exists() else ''
 
 
+# S11-5: writing-rules.md 의 "(예: ...)" 안내 줄을 실제 규칙으로 오인하지 않게 걷어낸다.
+#
+# templates/user-skeleton/writing-rules.md 는 각 절에 작성 예시를 괄호로 넣어둔다.
+# 사용자가 그 줄을 지우지 않으면 지금까지 그대로 프롬프트에 실려 "규칙" 으로 읽혔다.
+# 실측: users/채빈/writing-rules.md 의 "- (예: 문항당 최대 3문장, 핵심만)" 이 들어가
+# 스킬 Step 9 의 "글자수에 최대한 가깝게 채우되" 와 정면 충돌하고 있었다.
+# 기존 코드는 파일 *전체* 가 비었을 때만 치환해서 이 경우를 못 걸렀다.
+#
+# 템플릿 파일 자체는 사람에게 유용한 안내이므로 지우지 않는다. 코드가 읽을 때만 걷어낸다.
+_PLACEHOLDER_BULLET = re.compile(r'^\s*[-*]\s*\(\s*예시?\s*[:：]')
+_EMPTY_BULLET = re.compile(r'^\s*[-*]\s*$')
+_HEADING = re.compile(r'^\s*#{1,6}\s')
+_REAL_BULLET = re.compile(r'^\s*[-*]\s*\S')
+
+
+def strip_placeholder_rules(text: str) -> str:
+    """안내용 예시 줄과, 그 결과 내용이 비게 된 소제목을 제거한다.
+    남은 실제 규칙이 하나도 없으면 빈 문자열을 돌려준다 (호출자가 "규칙 없음" 으로 처리)."""
+    if not text or not text.strip():
+        return ''
+
+    kept = [ln for ln in text.split('\n')
+            if not _PLACEHOLDER_BULLET.match(ln) and not _EMPTY_BULLET.match(ln)]
+
+    # 불릿이 전부 걷혀 알맹이가 없어진 소제목은 같이 뺀다. 빈 소제목만 남으면
+    # 모델이 "이 항목은 의도적으로 비어 있다" 로 읽을 수 있다.
+    out, i = [], 0
+    while i < len(kept):
+        line = kept[i]
+        if _HEADING.match(line):
+            j = i + 1
+            has_body = False
+            while j < len(kept) and not _HEADING.match(kept[j]):
+                if kept[j].strip() and not kept[j].lstrip().startswith('---'):
+                    has_body = True
+                j += 1
+            if not has_body:
+                i = j
+                continue
+        out.append(line)
+        i += 1
+
+    result = '\n'.join(out).strip()
+    return result if any(_REAL_BULLET.match(ln) for ln in out) else ''
+
+
 def build_prompt(name, company, position, question, char_limit, count_mode,
                   profile_text, style_text, rules_text, interest_text,
                   company_text, reference_texts, selected_experiences, trends_text=''):
@@ -85,7 +131,7 @@ def build_prompt(name, company, position, question, char_limit, count_mode,
         else f'companies/{company}.md 캐시가 없습니다. MCP 가 연결되어 있지 않으므로 Step 2 지시대로 '
              '학습 데이터 기반 일반 정보만 참고하고, 과도하게 구체적인 최신 수치·뉴스는 인용하지 마세요.'
     )
-    rules_note = rules_text if rules_text.strip() else '(비어 있음 — 적용할 규칙 없음, 무시)'
+    rules_note = strip_placeholder_rules(rules_text) or '(비어 있음 — 적용할 규칙 없음, 무시)'
     count_desc = '공백 포함' if count_mode == '포함' else '공백 제외'
     # 고도화(2026-09-27): lib/trends.py 가 한 달에 한 번 자동 조사해두는 최신 자소서 작성
     # 트렌드. 참고용일 뿐 writing-style.md/writing-rules.md 보다 우선하지 않는다 — Claude.md
@@ -157,7 +203,7 @@ Step 2, Step 4 는 아래 안내를 따르세요. Step 9(출력 형식), Step 10
 """
 
 
-def build_retry_prompt(char_limit, count_mode, current_count):
+def build_retry_prompt(char_limit, count_mode, current_count, company=''):
     """초과했을 때뿐 아니라, 많이 모자랄 때도 부른다 (스킬 Step 9: "여유 있게 짧게 쓰는 것 금지").
     목표를 하나의 정확한 숫자로 주고, 그 숫자에 맞춰 문장 단위로 더하거나 빼라고 구체적으로 지시한다.
     "권장"처럼 약한 표현을 쓰면 모델이 충분히 맞추지 않는 경향이 실측에서 확인되어, 지시를 강하게 바꿨다.
@@ -188,7 +234,7 @@ def build_retry_prompt(char_limit, count_mode, current_count):
 
 ===META===
 참조한 경험: [경험명] ([파일명])
-참조한 기업 정보: [companies/{{company}}.md 또는 "없음 (추론)"]
+참조한 기업 정보: [companies/{company}.md 또는 "없음 (추론)"]
 참조한 레퍼런스: [파일명 또는 "없음"]
 오래된 경험 사용 여부: [예/아니오]
 ===END===
@@ -362,7 +408,7 @@ def coverletter_events(name, root, company, position, question, char_limit, coun
         yield 'progress', {'stage': 'retry', 'attempt': retries, 'diff': actual - char_limit}
         messages = messages + [
             {'role': 'assistant', 'content': result['text']},
-            {'role': 'user', 'content': build_retry_prompt(char_limit, count_mode, actual)},
+            {'role': 'user', 'content': build_retry_prompt(char_limit, count_mode, actual, company)},
         ]
         try:
             result = yield from call_llm(messages)

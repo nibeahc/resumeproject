@@ -45,6 +45,47 @@ class ParseAnswerTest(unittest.TestCase):
         self.assertEqual((answer, meta), ('', ''))
 
 
+class StripPlaceholderRulesTest(unittest.TestCase):
+    """S11-5: writing-rules.md 의 "(예: ...)" 안내 줄이 실제 규칙으로 프롬프트에 실리던 문제.
+
+    예전 코드는 파일 *전체* 가 비었을 때만 치환해서, 템플릿 예시가 한 줄이라도 남아 있으면
+    그대로 모델에 갔다. 실측: "- (예: 문항당 최대 3문장, 핵심만)" 이 스킬의
+    "글자수에 최대한 가깝게 채우되" 와 충돌하고 있었다.
+    """
+
+    def test_removes_placeholder_bullets(self):
+        out = generate_route.strip_placeholder_rules(
+            '## 표현 규칙\n\n- 진짜 규칙이다\n- (예: "~했어요" 체 사용 금지)\n')
+        self.assertIn('진짜 규칙이다', out)
+        self.assertNotIn('~했어요', out)
+
+    def test_keeps_real_rule_that_contains_an_inline_example(self):
+        """괄호 예시가 줄 중간에 있는 진짜 규칙은 남아야 한다 (채빈 파일의 영어 워딩 규칙)."""
+        rule = '- 영어 워딩을 한글로 풀어 쓸 것 (예: "Korean Workshop" → "워크숍")'
+        out = generate_route.strip_placeholder_rules('## 표현 규칙\n\n' + rule + '\n')
+        self.assertIn('Korean Workshop', out)
+
+    def test_drops_sections_left_empty(self):
+        out = generate_route.strip_placeholder_rules(
+            '## 표현 규칙\n\n- 진짜 규칙\n\n## 선호하는 문단 길이\n\n- (예: 문항당 최대 3문장)\n')
+        self.assertIn('표현 규칙', out)
+        self.assertNotIn('선호하는 문단 길이', out)
+        self.assertNotIn('3문장', out)
+
+    def test_all_placeholders_yields_empty(self):
+        out = generate_route.strip_placeholder_rules(
+            '# 규칙\n\n## 구조\n\n- (예: 어쩌고)\n\n## 금지\n\n-\n')
+        self.assertEqual(out, '')
+
+    def test_prompt_does_not_carry_placeholders(self):
+        prompt = generate_route.build_prompt(
+            '홍길동', '기업', '직무', '문항', 100, '포함',
+            '프로필', '문체', '## 선호하는 문단 길이\n\n- (예: 문항당 최대 3문장, 핵심만)\n',
+            '관심직무', '', [], [('a.md', '경험')])
+        self.assertNotIn('3문장', prompt)
+        self.assertIn('적용할 규칙 없음', prompt)
+
+
 class GeneratePageTest(unittest.TestCase):
     """S1-4: GET /generate/<name> 페이지 렌더링."""
 
