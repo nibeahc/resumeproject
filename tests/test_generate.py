@@ -82,10 +82,13 @@ class StripPlaceholderRulesTest(unittest.TestCase):
         self.assertEqual(out, '')
 
     def test_prompt_does_not_carry_placeholders(self):
+        from lib.coverletter import CoverletterContext
+        ctx = CoverletterContext(
+            profile_text='프로필', style_text='문체',
+            rules_text='## 선호하는 문단 길이\n\n- (예: 문항당 최대 3문장, 핵심만)\n',
+            interest_text='관심직무')
         prompt = generate_route.build_prompt(
-            '홍길동', '기업', '직무', '문항', bounded(100),
-            '프로필', '문체', '## 선호하는 문단 길이\n\n- (예: 문항당 최대 3문장, 핵심만)\n',
-            '관심직무', '', [], [('a.md', '경험')])
+            '홍길동', '기업', '직무', '문항', bounded(100), ctx, [('a.md', '경험')])
         self.assertNotIn('3문장', prompt)
         self.assertIn('적용할 규칙 없음', prompt)
 
@@ -297,6 +300,13 @@ class GenerateRouteTest(unittest.TestCase):
         sent = m.call_args.kwargs['messages'][0]['content']
         self.assertIn('단 하나도 쓰지 마세요', sent)
         self.assertNotIn('학습 데이터', sent)
+
+    def test_single_route_has_no_job_block(self):
+        """단독 생성은 공고가 없다. 빈 블록이 들어가 프롬프트를 어지럽히면 안 된다."""
+        fake = llm_result('===ANSWER===\n' + '가' * 97 + '\n===END===\n===META===\nx\n===END===\n')
+        with patch.object(generate_route, 'stream_complete', return_value=fake) as m:
+            self.post().get_data()
+        self.assertNotIn('지원 공고', m.call_args.kwargs['messages'][0]['content'])
 
     def test_researched_company_is_ready(self):
         fake = llm_result('===ANSWER===\n' + '가' * 97 + '\n===END===\n===META===\nx\n===END===\n')
@@ -602,6 +612,22 @@ class GenerateBundleTest(unittest.TestCase):
         payload = {'job_id': str(self.job_id), 'question': '지원 동기', 'char_limit': '50'}
         payload.update(overrides)
         return self.c.post('/generate/홍길동/bundle', json=payload)
+
+    def test_job_posting_reaches_coverletter_prompt(self):
+        """S11-8 / 검토 0.3: 공고 레코드를 통째로 들고 있으면서 회사명과 직무명 두 문자열만
+        생성에 넘기고 있었다. 프롬프트가 직무 적합성을 요구하면서 정작 그 직무의 실제
+        요구조건을 주지 않은 셈이다."""
+        self.insert_match()
+        fine = llm_result('===ANSWER===\n' + '가' * 49 + '\n===END===\n===META===\nx\n===END===\n')
+        fake_portfolio = llm_result('===TOC===\n1. 도입\n===END===\n\n===CHAPTER: 1===\n요약\n===END===\n')
+        with patch.object(portfolio_module, 'stream_complete', return_value=fake_portfolio), \
+             patch.object(generate_route, 'stream_complete', return_value=fine) as m:
+            self.post().get_data()
+        prompt = m.call_args.kwargs['messages'][0]['content']
+        self.assertIn('지원 공고', prompt)
+        self.assertIn('필수조건', prompt)
+        self.assertIn('조건1', prompt)
+        self.assertIn('지어내지 마세요', prompt)
 
     def test_over_limit_coverletter_is_not_ok(self):
         """S11-4: 번들은 done 만 보고 coverletter_ok=True 로 올렸다. 글자수를 초과한

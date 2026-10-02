@@ -1,35 +1,41 @@
-"""생성 라우트. skills/write-coverletter.md 로 문항 하나에 대한 자소서 문단을 만든다 (ROADMAP S1-3).
+"""생성 라우트 (ROADMAP S1-3, S11-7 에서 엔진 분리).
 
-이 라우트에서 가장 중요한 규칙은 하나다: **글자수는 LLM 이 아니라 코드가 잰다.**
-S1-1 에서 모델이 자체 보고한 글자수(683자)가 실제 글자수(715자)와 32자 어긋나는 것을 실측으로
-확인했다 (PROGRESS.md 참고). 그래서 여기서는 모델이 뭐라고 보고하든 무시하고, len() 으로 직접 센다.
+**엔진은 lib/coverletter.py 에 있다.** 이 파일은 HTTP 경계만 맡는다 — 폼/JSON 파싱,
+경로 안전성 검사(web.paths), SSE 직렬화. 생성 로직이 라우트 안에 있던 동안에는
+current_app 에 묶여 있어서 웹 외의 호출자가 쓸 수 없었고, 테스트도 반드시 HTTP 를
+거쳐야 했다. lib/resume.py, lib/portfolio.py 는 원래부터 Flask 비의존이다.
 
-원본 스킬(write-coverletter.md)의 자연어 Step 9 출력 형식은 사람이 읽기엔 좋지만 코드가 안정적으로
-파싱하기엔 약하다. 그래서 S1-2 와 같은 방식으로, 우리가 정한 구분자 안에 본문만 담아 달라고 요청한다
-(스킬 파일 자체는 건드리지 않는다 — 1-B 원칙. 구분자는 이 라우트의 사용자 메시지에서만 요구한다).
+경로 검증은 여기 남는다. web.paths.safe_path 는 flask.abort(400) 을 부르므로 lib 로
+내려보낼 수 없고, 내려보내서도 안 된다 — 사용자 입력을 경로로 쓰는 1차 방어선은
+HTTP 레이어의 책임이다 (tests/test_web_security.py 가 이 경계를 지킨다).
 
-경험 선택(Step 7)은 lib/selector.py 가 코드로 한다 (ROADMAP S3-1). LLM 호출에는 선택된 1~2개
-경험의 전문만 실린다 — 전체를 다 보내던 이전 방식보다 비용이 훨씬 적게 든다. 코드가 고른 결과가
-마음에 안 들면 요청에 experience_files 를 넣어 강제로 지정할 수 있다 (S3-2 가 이 위에 UI 를 얹는다).
+lib.coverletter 의 몇 함수를 여기서 다시 노출한다(아래 import). 테스트와 기존 호출부가
+generate_route.count_chars 처럼 참조하고 있어서, 이동이 '순수 이동' 으로 남으려면 이름이
+그대로 보여야 한다. stream_complete 도 모듈 레벨 import 를 유지한다 — 테스트가
+patch.object(generate_route, 'stream_complete') 로 가로채는데, lib 가 자기 이름공간으로
+따로 import 하면 그 patch 가 안 먹는다(lib/portfolio.py 에서 실제로 겪은 함정이다).
+그래서 라우트가 complete= 로 주입한다.
 """
 import json
-import queue
-import re
-import threading
-from pathlib import Path
-from typing import NamedTuple, Optional
 
 from flask import (Blueprint, Response, current_app, jsonify, redirect, render_template,
                    request, stream_with_context, url_for)
 
-from lib import db, matcher, portfolio, resume, trends
+from lib import db, matcher, portfolio, resume
+from lib.coverletter import (ISSUE_DROPPED_OVERRIDES, ISSUE_OVER_LIMIT,  # noqa: F401 (재노출)
+                             ISSUE_UNDERSHOOT, ISSUE_UNRESEARCHED_COMPANY, LENGTH_TOLERANCE,
+                             MAX_CHAR_LIMIT, MAX_RETRIES, STATUS_READY, STATUS_REVIEW_REQUIRED,
+                             TARGET_UNDERSHOOT, LengthSpec, build_prompt, build_retry_prompt,
+                             count_chars, gather_context, generate_coverletter_events,
+                             parse_answer, read_if_exists, strip_placeholder_rules)
 from lib.llm import stream_complete
 from lib.resume import _safe_folder_name
-from lib.selector import MAX_EXPERIENCES
-from lib.selector import select as select_experiences
-from lib.skills import load_skill
 from web.data import get_open_jobs
-from web.paths import output_dir, project_root, safe_path, trends_dir, user_dir, valid_segment
+from web.paths import output_dir, project_root, trends_dir, user_dir, valid_segment
+
+bp = Blueprint('generate', __name__)
+
+
 
 
 def _db_path():
@@ -52,259 +58,6 @@ def generate_page(name):
     jobs = get_open_jobs(db_path=_db_path())  # S7-3: 공고에서 불러오기 드롭다운
     return render_template('generate.html', user=name, exp_count=exp_count, jobs=jobs)
 
-_ANSWER_BLOCK = re.compile(r'===ANSWER===\n(?P<body>.*?)\n===END===', re.S)
-_META_BLOCK = re.compile(r'===META===\n(?P<body>.*?)\n===END===', re.S)
-
-MAX_RETRIES = 1  # ROADMAP: 초과 시 재시도 1회
-
-# 매직넘버를 한곳에 모은다 (S11-5). 각 값의 근거는 PROGRESS.md 의 S1-1~S1-3 실측 기록이다.
-LENGTH_TOLERANCE = 0.05   # 목표 대비 이만큼 모자라면 다시 시킨다 (스킬 Step 9: 여유 있게 짧게 쓰기 금지)
-TARGET_UNDERSHOOT = 20    # 재시도 목표를 상한에 붙이지 않고 이만큼 아래로 둔다 (미세 오차 대비)
-MAX_CHAR_LIMIT = 10000    # 상한의 상한. 모델 max_tokens=3000 과 모순되는 값을 막는다
-
-# S11-4: "저장했다" 와 "제출해도 된다" 를 분리한다. 이 둘을 같은 값으로 묶어두면
-# (예전의 done → coverletter_ok=True) 글자수를 초과한 초안도 성공으로 보고된다.
-# 저장은 그대로 한다 — 사람이 손봐서 쓸 수 있으니 버리지 않는다. 다만 ready 로 올리지 않는다.
-STATUS_READY = 'ready_for_user'          # 자동 검사를 통과했다. 사용자 최종 승인이나 제출과는 다른 뜻이다
-STATUS_REVIEW_REQUIRED = 'review_required'  # 저장은 됐지만 사람이 봐야 한다
-
-ISSUE_OVER_LIMIT = 'over_limit'
-ISSUE_UNDERSHOOT = 'undershoot'
-ISSUE_DROPPED_OVERRIDES = 'dropped_overrides'
-ISSUE_UNRESEARCHED_COMPANY = 'unresearched_company'
-
-
-class LengthSpec(NamedTuple):
-    """분량 요구사항 (S11-3).
-
-    예전에는 char_limit 양의 정수 하나뿐이라 "제한 없음" 을 표현할 방법이 없었다.
-    사용자가 제한을 안 주면 에러였고, 대화 경로에서 "제한 없음" 이라고 말해도 웹에는
-    그 상태가 존재하지 않았다 (검토 0.4).
-
-    mode='unlimited' 면 hard_max_chars 는 None 이고 글자수 재시도 루프를 돌지 않는다.
-    검토 C-3 의 soft_target_chars / detail_level 은 넣지 않았다 — 입력 UI 가 없으면
-    죽은 파라미터가 된다. 대신 "제한 없음 = 깊게 쓰기" 라는 뜻을 프롬프트 지시문에 담는다.
-    """
-    mode: str                      # 'bounded' | 'unlimited'
-    hard_max_chars: Optional[int]  # unlimited 면 None
-    count_mode: str                # '포함' | '제외'
-
-    @property
-    def bounded(self) -> bool:
-        return self.mode == 'bounded'
-
-    @property
-    def count_desc(self) -> str:
-        return '공백 포함' if self.count_mode == '포함' else '공백 제외'
-
-
-def count_chars(text, count_mode):
-    return len(text) if count_mode == '포함' else len(re.sub(r'\s', '', text))
-
-
-def read_if_exists(path: Path):
-    return path.read_text(encoding='utf-8') if path.exists() else ''
-
-
-# S11-5: writing-rules.md 의 "(예: ...)" 안내 줄을 실제 규칙으로 오인하지 않게 걷어낸다.
-#
-# templates/user-skeleton/writing-rules.md 는 각 절에 작성 예시를 괄호로 넣어둔다.
-# 사용자가 그 줄을 지우지 않으면 지금까지 그대로 프롬프트에 실려 "규칙" 으로 읽혔다.
-# 실측: users/채빈/writing-rules.md 의 "- (예: 문항당 최대 3문장, 핵심만)" 이 들어가
-# 스킬 Step 9 의 "글자수에 최대한 가깝게 채우되" 와 정면 충돌하고 있었다.
-# 기존 코드는 파일 *전체* 가 비었을 때만 치환해서 이 경우를 못 걸렀다.
-#
-# 템플릿 파일 자체는 사람에게 유용한 안내이므로 지우지 않는다. 코드가 읽을 때만 걷어낸다.
-_PLACEHOLDER_BULLET = re.compile(r'^\s*[-*]\s*\(\s*예시?\s*[:：]')
-_EMPTY_BULLET = re.compile(r'^\s*[-*]\s*$')
-_HEADING = re.compile(r'^\s*#{1,6}\s')
-_REAL_BULLET = re.compile(r'^\s*[-*]\s*\S')
-
-
-def strip_placeholder_rules(text: str) -> str:
-    """안내용 예시 줄과, 그 결과 내용이 비게 된 소제목을 제거한다.
-    남은 실제 규칙이 하나도 없으면 빈 문자열을 돌려준다 (호출자가 "규칙 없음" 으로 처리)."""
-    if not text or not text.strip():
-        return ''
-
-    kept = [ln for ln in text.split('\n')
-            if not _PLACEHOLDER_BULLET.match(ln) and not _EMPTY_BULLET.match(ln)]
-
-    # 불릿이 전부 걷혀 알맹이가 없어진 소제목은 같이 뺀다. 빈 소제목만 남으면
-    # 모델이 "이 항목은 의도적으로 비어 있다" 로 읽을 수 있다.
-    out, i = [], 0
-    while i < len(kept):
-        line = kept[i]
-        if _HEADING.match(line):
-            j = i + 1
-            has_body = False
-            while j < len(kept) and not _HEADING.match(kept[j]):
-                if kept[j].strip() and not kept[j].lstrip().startswith('---'):
-                    has_body = True
-                j += 1
-            if not has_body:
-                i = j
-                continue
-        out.append(line)
-        i += 1
-
-    result = '\n'.join(out).strip()
-    return result if any(_REAL_BULLET.match(ln) for ln in out) else ''
-
-
-def build_prompt(name, company, position, question, length: 'LengthSpec',
-                  profile_text, style_text, rules_text, interest_text,
-                  company_text, reference_texts, selected_experiences, trends_text=''):
-    exp_dump = '\n\n'.join(f'--- users/{name}/experiences/{fn} ---\n{text}' for fn, text in selected_experiences)
-    ref_dump = ('\n\n'.join(f'--- {fn} ---\n{text}' for fn, text in reference_texts)
-                if reference_texts else '(로컬 레퍼런스 없음. MCP 는 이 환경에 연결되어 있지 않으므로 Step 4 는 생략)')
-    # S11-1: 캐시가 없을 때 "학습 데이터 기반 일반 정보만 참고하라" 고 지시하던 것을 지웠다.
-    # 그건 모델에게 기업 사실을 추론하라는 허가였고, 검토 0.1 이 지적한 우회 경로였다.
-    # 이 분기에 도달했다는 것은 사용자가 "기업 정보 없이 작성" 에 명시적으로 동의했다는 뜻이다.
-    # 그래도 없는 사실을 만들어 쓰게 두지는 않는다 — 쓸 수 있는 범위를 좁힌다.
-    company_note = (
-        f'--- companies/{company}.md ---\n{company_text}'
-        if company_text.strip()
-        else f'companies/{company}.md 가 없습니다. 이 기업에 대해 **검증된 자료가 하나도 없는 상태**입니다.\n'
-             f'- 기업 고유의 사실(매출·규모·연혁·뉴스·수상·인물 발언·슬로건·인재상·핵심가치)을 '
-             f'**단 하나도 쓰지 마세요.** 알고 있다고 생각되는 내용도 쓰지 마세요.\n'
-             f'- 기업이나 업계에 대한 서술이 필요하면 아래 [지원 공고] 에 실제로 적힌 내용만 쓰세요.\n'
-             f'- "{company}" 라는 이름은 써도 되지만, 그 기업이 어떤 곳인지 설명하지 마세요.\n'
-             f'- 지원동기는 기업 칭찬이 아니라 **직무 자체에 대한 관심과 본인 경험의 연결**로 쓰세요.'
-    )
-    rules_note = strip_placeholder_rules(rules_text) or '(비어 있음 — 적용할 규칙 없음, 무시)'
-    # S11-3: 제한이 있을 때와 없을 때는 요구가 정반대다. 전자는 "넘기지 마라",
-    # 후자는 "짧게 끝내지 마라, 다만 경험을 더 늘리지도 마라" 다.
-    if length.bounded:
-        length_line = f'글자수: {length.hard_max_chars}자 ({length.count_desc})'
-        length_instruction = (
-            f'- 글자수는 최대한 {length.hard_max_chars}자에 가깝게 채우되 절대 넘기지 마세요 '
-            f'(여유를 약간 두는 편이 넘기는 것보다 낫습니다).'
-        )
-    else:
-        length_line = f'글자수: 제한 없음 (세는 기준은 {length.count_desc})'
-        length_instruction = (
-            '- 글자수 제한이 없습니다. 짧게 요약하지 마세요.\n'
-            '- 다만 **제한이 없다는 것은 경험을 더 끌어오라는 뜻이 아닙니다.** 주어진 경험의\n'
-            '  배경, 그때 본인이 내린 판단과 그 이유, 실행 과정, 결과, 직무와의 연결을\n'
-            '  충분히 깊게 쓰세요.\n'
-            '- 분량을 채우려고 추측이나 일반론을 덧붙이지 마세요. 쓸 근거가 떨어지면 거기서 끝내세요.'
-        )
-    # 고도화(2026-09-27): lib/trends.py 가 한 달에 한 번 자동 조사해두는 최신 자소서 작성
-    # 트렌드. 참고용일 뿐 writing-style.md/writing-rules.md 보다 우선하지 않는다 — Claude.md
-    # 의 "반드시 해당 사용자의 writing-style.md 어투를 따를 것" 절대 원칙이 이 트렌드 참고보다
-    # 위에 있다는 걸 프롬프트에도 명시한다(안 그러면 트렌드 문구를 어투보다 우선할 위험이 있다).
-    trends_note = (
-        trends_text.strip()
-        if trends_text.strip()
-        else '(아직 조사된 트렌드 없음 — 무시)'
-    )
-
-    return f"""[요청]
-사용자: {name}
-기업명: {company}
-직무명: {position}
-문항: {question}
-{length_line}
-
-Step 1(파일 읽기)은 아래에 이미 첨부되어 있습니다. Step 5~7(문항 분석, 유형 분류, 경험 선택)은
-코드가 이미 끝냈습니다 — 아래 [이미 선택된 경험]만 보고 Step 8(문단 작성)을 하세요.
-Step 2, Step 4 는 아래 안내를 따르세요. Step 9(출력 형식), Step 10(파일 저장)은 이 호출에서 스킵합니다
-(코드가 별도로 처리합니다). 대신 아래 구분자 형식으로만 답하세요.
-
---- users/{name}/profile.md ---
-{profile_text}
-
---- users/{name}/writing-style.md ---
-{style_text}
-
---- users/{name}/writing-rules.md ---
-{rules_note}
-
---- users/{name}/관심직무.md ---
-{interest_text}
-
-[Step 2: 기업 정보]
-{company_note}
-
-[Step 4: 합격 사례 레퍼런스]
-{ref_dump}
-레퍼런스가 있어도 문장·표현·사례를 그대로 쓰지 마세요. 구조·전개 방식만 참고하고,
-표현과 사례는 반드시 아래 experiences/ 원문에서만 가져오세요.
-
-[참고: 최신 자소서 작성 트렌드 — 참고용일 뿐입니다. writing-style.md/writing-rules.md 와
-충돌하면 반드시 writing-style.md/writing-rules.md 를 따르세요]
-{trends_note}
-
-[이미 선택된 경험 — 이 안에서만 쓰세요. 다른 경험을 지어내거나 끌어오지 마세요]
-{exp_dump}
-
-[지시]
-- 위에 주어진 경험만 사용하세요. 여러 경험이 있으면 자연스럽게 연결해서 서술하세요.
-- 선택한 경험 파일에 "⚠️ 오래된 경험" 표시가 있으면, 이 호출은 되물을 수 없으므로 일단 그대로 사용하되
-  META 블록에 그 사실을 명시하세요.
-{length_instruction}
-- bullet point 금지, 문단 형식.
-
-[출력 형식 — 반드시 이 형식만 사용, 다른 설명 붙이지 말 것]
-===ANSWER===
-(작성된 문단. 이것만 글자수 계산에 사용되니 다른 텍스트를 섞지 마세요)
-===END===
-
-===META===
-참조한 경험: [경험명] ([파일명])
-참조한 기업 정보: [companies/{company}.md 또는 "없음 (추론)"]
-참조한 레퍼런스: [파일명 또는 "없음"]
-오래된 경험 사용 여부: [예/아니오]
-===END===
-"""
-
-
-def build_retry_prompt(length: 'LengthSpec', current_count, company=''):
-    """초과했을 때뿐 아니라, 많이 모자랄 때도 부른다 (스킬 Step 9: "여유 있게 짧게 쓰는 것 금지").
-    목표를 하나의 정확한 숫자로 주고, 그 숫자에 맞춰 문장 단위로 더하거나 빼라고 구체적으로 지시한다.
-    "권장"처럼 약한 표현을 쓰면 모델이 충분히 맞추지 않는 경향이 실측에서 확인되어, 지시를 강하게 바꿨다.
-    """
-    char_limit = length.hard_max_chars
-    count_desc = length.count_desc
-    diff = current_count - char_limit
-    target = max(char_limit - TARGET_UNDERSHOOT, 1)
-
-    if diff > 0:
-        direction = (
-            f'방금 작성한 ANSWER 가 {char_limit}자({count_desc}) 제한을 {diff}자 초과했습니다 (실제 {current_count}자).\n'
-            f'같은 경험, 같은 핵심 내용을 유지하되 문장 1~2개를 통째로 줄이거나 수식어를 정리해서 압축하세요.'
-        )
-    else:
-        direction = (
-            f'방금 작성한 ANSWER 는 {char_limit}자({count_desc}) 목표보다 {-diff}자 모자랍니다 (실제 {current_count}자).\n'
-            f'같은 경험 안에서 아직 안 쓴 구체적 사실(수치, 과정, 계기 등)을 문장으로 추가하세요. '
-            f'없는 내용을 지어내지 말고, 이미 첨부된 experiences/ 원문에 있는 사실만 더 끌어와 채우세요.'
-        )
-
-    return f"""{direction}
-목표는 정확히 {target}자 근처({count_desc} 기준)입니다. 다 쓴 뒤 스스로 글자 수를 세어 {target}자에 가까운지 확인하고,
-차이가 크면 그 자리에서 한 번 더 다듬어서 최종 결과만 아래 형식으로 답하세요.
-
-===ANSWER===
-(다시 쓴 문단)
-===END===
-
-===META===
-참조한 경험: [경험명] ([파일명])
-참조한 기업 정보: [companies/{company}.md 또는 "없음 (추론)"]
-참조한 레퍼런스: [파일명 또는 "없음"]
-오래된 경험 사용 여부: [예/아니오]
-===END===
-"""
-
-
-def parse_answer(text):
-    a = _ANSWER_BLOCK.search(text)
-    m = _META_BLOCK.search(text)
-    answer = a.group('body').strip() if a else ''
-    meta = m.group('body').strip() if m else ''
-    return answer, meta
 
 
 def sse(event, data):
@@ -376,232 +129,6 @@ def _validate_generate_params(data):
             use_trends, allow_unresearched)
 
 
-def coverletter_events(name, root, company, position, question, length: 'LengthSpec',
-                        override_files=None, folder_name=None, use_trends=True,
-                        allow_unresearched_company=False):
-    """자소서 한 문항을 생성해 저장하고, (event, data) 튜플을 yield 하는 순수 제너레이터.
-
-    /generate/<name> (단독 생성)과 /generate/<name>/bundle (S7-3 공고 연동 일괄 생성) 양쪽에서
-    그대로 재사용한다 — 두 라우트가 이 로직을 복제하면 언젠가 하나만 고치고 잊어버리게 된다.
-    folder_name 을 주면 outputs/[이름]/[folder_name]/ 에 저장한다(lib/resume.py, lib/portfolio.py
-    와 폴더를 통일하려는 것 — 공고 연동 시엔 회사명/직무명이 공고 레코드에서 오므로 그 값 그대로
-    폴더명을 만들면 안전하지 않을 수 있어 호출자가 이미 정리한 폴더명을 넘긴다). 안 주면 기존처럼
-    [기업명]_[직무명] 을 그대로 쓴다(이 경우 company/position 은 이미 valid_segment() 를 통과한
-    값이어야 한다 — 단독 라우트가 그렇게 보장한다).
-
-    root 는 이미 검증된 user_dir(name) 이다 — 이 함수 자체는 name 으로 다시 경로를 만들지 않는다
-    (제너레이터 시작 전에 이미 끝났어야 할 검증을 여기서 반복하지 않기 위해).
-    """
-    issues = []  # S11-4: 저장은 하되 ready 로 올리면 안 되는 사유를 모은다
-
-    exp_dir = root / 'experiences'
-    if not (exp_dir.exists() and any(exp_dir.glob('*.md'))):
-        yield 'error', {'message': '경험 파일이 없습니다. 먼저 파싱을 진행하세요.'}
-        return
-
-    profile_text = read_if_exists(root / 'profile.md')
-    style_text = read_if_exists(root / 'writing-style.md')
-    rules_text = read_if_exists(root / 'writing-rules.md')
-    interest_text = read_if_exists(root / '관심직무.md')
-    company_text = read_if_exists(project_root() / 'companies' / f'{company}.md')
-
-    # S11-1: 기업 자료 게이트. 예전에는 캐시가 없어도 company_cached: False 를 progress 로
-    # 흘릴 뿐 아무도 막지 않았고, 프롬프트가 오히려 "학습 데이터로 추론하라" 고 지시했다.
-    # 이 레포에는 companies/*.md 를 **쓰는 코드 경로가 없어서**(수작업 파일이다) 캐시 미스가
-    # 기본값에 가깝다 — 그래서 조용한 열화가 아니라 멈춤이어야 한다.
-    if not company_text.strip():
-        if not allow_unresearched_company:
-            yield 'error', {
-                'message': f'companies/{company}.md 가 없습니다. 기업 자료 없이 쓰면 '
-                           f'사실관계를 지어낼 위험이 큽니다. 기업 조사를 먼저 하거나, '
-                           f'공고 내용만으로 작성하는 데 동의해 주세요.',
-                'needs_input': 'company_research',
-                'company': company,
-            }
-            return
-        issues.append(ISSUE_UNRESEARCHED_COMPANY)
-        yield 'progress', {'stage': 'unresearched_company', 'company': company}
-    # use_trends=False 면 아예 빈 문자열로 넘긴다 — build_prompt 는 빈 값일 때 이미
-    # "(아직 조사된 트렌드 없음 — 무시)" 로 처리하므로 별도 분기 없이 그대로 재사용한다.
-    # S11-6: load_trends 는 approved.md 만 읽는다. 자동 수집본(raw/)은 사람이 승인하기
-    # 전까지 여기 들어오지 않는다.
-    trends_text = (trends.load_trends(trends_dir()) or '') if use_trends else ''
-
-    ref_dir = project_root() / 'references' / 'coverletter' / position
-    reference_texts = []
-    if ref_dir.exists():
-        for f in sorted(ref_dir.glob('*.md'))[:3]:
-            reference_texts.append((f.name, f.read_text(encoding='utf-8')))
-
-    # Step 5~7: 경험 선택은 LLM 이 아니라 코드가 한다 (S3-1). 선택된 것만 프롬프트에 실린다.
-    selection = select_experiences(exp_dir, question, interest_text=interest_text,
-                                    max_count=MAX_EXPERIENCES, override_filenames=override_files)
-
-    # S11-2: selector 는 보고만 한다. 중단 여부는 여기서 정한다.
-    # UI 가 체크박스를 2개로 묶어도 API 를 직접 부르면 그냥 들어왔다 — 서비스 쪽에서 막아야 한다.
-    if selection['unknown_overrides']:
-        yield 'error', {
-            'message': '지정한 경험 파일을 찾을 수 없습니다: '
-                       + ', '.join(selection['unknown_overrides']),
-            'unknown_overrides': selection['unknown_overrides'],
-        }
-        return
-    if not selection['selected']:
-        yield 'error', {'message': '사용할 경험이 하나도 선택되지 않았습니다. 경험을 선택한 뒤 다시 시도하세요.'}
-        return
-    if selection['dropped_overrides']:
-        # 자르고 계속한다. 사용자가 고른 것을 통째로 버리는 것보다 낫지만, 고른 대로
-        # 나오지 않았으니 사람이 확인해야 한다.
-        issues.append(ISSUE_DROPPED_OVERRIDES)
-        yield 'progress', {'stage': 'overrides_trimmed',
-                            'kept': [c.experience.filename for c in selection['selected']],
-                            'dropped': selection['dropped_overrides'],
-                            'max': MAX_EXPERIENCES}
-
-    selected_experiences = [(c.experience.filename, c.experience.path.read_text(encoding='utf-8'))
-                             for c in selection['selected']]
-    yield 'progress', {
-        'stage': 'selected',
-        'question_type': selection['question_type'],
-        'selected': [{'filename': c.experience.filename, 'title': c.experience.title,
-                      'score': c.score, 'reasons': c.reasons} for c in selection['selected']],
-        'candidates': [{'filename': c.experience.filename, 'title': c.experience.title,
-                        'score': c.score, 'reasons': c.reasons} for c in selection['candidates'][:6]],
-    }
-
-    yield 'progress', {'stage': 'context_ready', 'experiences': len(selected_experiences),
-                        'company_cached': bool(company_text.strip()), 'references': len(reference_texts)}
-
-    system = load_skill('write-coverletter')
-    user_msg = build_prompt(name, company, position, question, length,
-                             profile_text, style_text, rules_text, interest_text,
-                             company_text, reference_texts, selected_experiences, trends_text)
-    messages = [{'role': 'user', 'content': user_msg}]
-
-    def call_llm(msgs):
-        q = queue.Queue()
-
-        def worker():
-            try:
-                result = stream_complete(system=system, messages=msgs, max_tokens=3000,
-                                          on_delta=lambda c: q.put(('delta', c)))
-                q.put(('done', result))
-            except Exception as e:  # noqa: BLE001
-                q.put(('error', str(e)))
-
-        threading.Thread(target=worker, daemon=True).start()
-        chars_since_last = 0
-        while True:
-            kind, payload = q.get()
-            if kind == 'delta':
-                chars_since_last += len(payload)
-                if chars_since_last >= 200:
-                    yield 'progress', {'stage': 'generating'}
-                    chars_since_last = 0
-                continue
-            if kind == 'error':
-                raise RuntimeError(payload)
-            return payload
-
-    try:
-        result = yield from call_llm(messages)
-    except RuntimeError as e:
-        yield 'error', {'message': f'LLM 호출 실패: {e}'}
-        return
-
-    answer, meta = parse_answer(result['text'])
-    actual = count_chars(answer, length.count_mode)
-    yield 'progress', {'stage': 'draft', 'chars': actual, 'limit': length.hard_max_chars,
-                        'length_mode': length.mode}
-
-    # exceeded 는 "초과했다" 라는 뜻 그대로 유지한다 (파일 경고, 완료 이벤트, ROADMAP 완료 조건이
-    # 전부 이 이름으로 추적한다). 재시도를 시킬지 여부(needs_retry)는 이보다 넓다 — 스킬 Step 9 가
-    # "여유 있게 짧게 쓰는 것 금지" 라고 못박았으므로, 많이 모자란 경우도 다시 시킨다.
-    retries = 0
-    exceeded = False
-    needs_retry = False
-    if length.bounded:
-        # S11-3: 제한이 없으면 "초과" 도 "모자람" 도 정의되지 않는다. 재시도 루프를 통째로 건넌다.
-        exceeded = actual > length.hard_max_chars
-        needs_retry = exceeded or abs(actual - length.hard_max_chars) / length.hard_max_chars > LENGTH_TOLERANCE
-    while needs_retry and retries < MAX_RETRIES:
-        retries += 1
-        yield 'progress', {'stage': 'retry', 'attempt': retries, 'diff': actual - length.hard_max_chars}
-        messages = messages + [
-            {'role': 'assistant', 'content': result['text']},
-            {'role': 'user', 'content': build_retry_prompt(length, actual, company)},
-        ]
-        try:
-            result = yield from call_llm(messages)
-        except RuntimeError as e:
-            yield 'error', {'message': f'재시도 중 LLM 호출 실패: {e}'}
-            return
-        answer, meta = parse_answer(result['text'])
-        actual = count_chars(answer, length.count_mode)
-        exceeded = actual > length.hard_max_chars
-        needs_retry = exceeded or abs(actual - length.hard_max_chars) / length.hard_max_chars > LENGTH_TOLERANCE
-
-    if not answer:
-        yield 'error', {'message': 'LLM 출력에서 ANSWER 블록을 찾지 못했습니다.', 'raw': result['text'][:500]}
-        return
-
-    # S11-4: 재시도를 다 쓰고도 목표를 못 맞춘 경우. exceeded(초과)뿐 아니라 크게 모자란
-    # 경우도 사람이 봐야 한다 — 스킬 Step 9 가 "여유 있게 짧게 쓰는 것 금지" 라고 못박았다.
-    if exceeded:
-        issues.append(ISSUE_OVER_LIMIT)
-    elif needs_retry:
-        issues.append(ISSUE_UNDERSHOOT)
-
-    # S7 부터 이력서(lib/resume.py)·포트폴리오(lib/portfolio.py)가 outputs/[이름]/[기업]_[직무]/
-    # 서브폴더에 저장하기 시작했다. 자소서만 플랫 파일로 따로 두면 S7-3(일괄 생성)에서 세 문서가
-    # 한 폴더에 모이지 않으니, 여기도 같은 서브폴더 구조로 맞춘다.
-    out_dir = output_dir(name)
-    out_path = safe_path(out_dir, folder_name or f'{company}_{position}', '자소서.md')
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    today = __import__('datetime').date.today().strftime('%Y.%m.%d')
-    exceeded_note = (f'\n⚠️ 글자수 초과: {actual}자 (제한 {length.hard_max_chars}자, '
-                     f'{actual - length.hard_max_chars}자 초과, 재시도 {retries}회 후에도 초과)\n') if exceeded else ''
-    length_desc = (f'목표 {length.hard_max_chars}자' if length.bounded else '길이 제한 없음')
-    # S11-1: 열화 모드로 쓴 글은 파일에도 흔적을 남긴다. 나중에 이 파일만 열어본 사람이
-    # 기업 근거가 없는 초안이라는 걸 알 수 있어야 한다.
-    unresearched_note = (f'\n⚠️ 기업 정보 미조사: companies/{company}.md 없이 사용자 동의 하에 작성됨. '
-                         f'기업 관련 서술을 반드시 직접 확인하세요.\n'
-                         if ISSUE_UNRESEARCHED_COMPANY in issues else '')
-    entry = f"""## {question}
-글자수: {actual}자 ({length.count_desc}, {length_desc}){exceeded_note}{unresearched_note}
-
-{answer}
-
----
-{meta}
-작성일: {today}
-"""
-    if out_path.exists():
-        out_path.write_text(out_path.read_text(encoding='utf-8').rstrip() + '\n\n' + entry, encoding='utf-8')
-    else:
-        out_path.write_text(f'# {company} {position}\n\n{entry}', encoding='utf-8')
-
-    yield 'done', {
-        'answer': answer,
-        'meta': meta,
-        'chars': actual,
-        'limit': length.hard_max_chars,
-        'length_mode': length.mode,
-        'count_mode': length.count_mode,
-        'exceeded': exceeded,
-        'retries': retries,
-        # S11-4: 자동 검사 결과. ready_for_user 는 "검사를 통과했다" 이지
-        # "사용자가 승인했다" 나 "제출했다" 가 아니다.
-        'status': STATUS_REVIEW_REQUIRED if issues else STATUS_READY,
-        'issues': issues,
-        'saved_to': str(out_path.relative_to(project_root().resolve())),
-        # S11-5: saved_to 는 프로젝트 루트 기준이라 화면에서 링크를 만들 때 쓰면
-        # outputs/<user>/ 를 다시 떼어내야 한다(예전엔 파일명만 떼어 서브폴더를 잃었다).
-        # rel_path 는 /output/<user>/<path:filename> 라우트에 그대로 붙일 수 있는 형태다.
-        'rel_path': str(out_path.relative_to(out_dir)).replace('\\', '/'),
-        'used_experiences': [fn for fn, _ in selected_experiences],  # 코드가 실제로 고른 파일 (LLM 자체보고가 아니다)
-    }
-
 
 @bp.route('/generate/<name>', methods=['POST'])
 def generate(name):
@@ -615,11 +142,20 @@ def generate(name):
             yield sse('error', {'message': ' '.join(errors)})
         return Response(bad(), mimetype='text/event-stream')
 
+    # 경로는 전부 여기서 해결해서 Path 로 넘긴다 (S11-7). lib 는 current_app 을 모른다.
+    ctx = gather_context(root,
+                         companies_dir=project_root() / 'companies',
+                         references_dir=project_root() / 'references' / 'coverletter',
+                         company=company, position=position,
+                         trends_base=trends_dir(), use_trends=use_trends)
+
     def stream():
-        for event, ev_data in coverletter_events(name, root, company, position, question,
-                                                  length, override_files,
-                                                  use_trends=use_trends,
-                                                  allow_unresearched_company=allow_unresearched):
+        for event, ev_data in generate_coverletter_events(
+                name, question, root / 'experiences',
+                company=company, position=position, length=length, context=ctx,
+                override_filenames=override_files,
+                allow_unresearched_company=allow_unresearched,
+                output_dir=output_dir(name), complete=stream_complete):
             yield sse(event, ev_data)
 
     return Response(stream_with_context(stream()), mimetype='text/event-stream')
@@ -693,10 +229,20 @@ def generate_bundle(name):
 
         coverletter_ok, coverletter_error, coverletter_path = False, None, None
         coverletter_status, coverletter_issues = None, []
-        for event, ev_data in coverletter_events(name, root, company, position, question, length,
-                                                  override_files, folder_name=folder_name,
-                                                  use_trends=use_trends,
-                                                  allow_unresearched_company=allow_unresearched):
+        # S11-8: 공고 레코드를 통째로 넘긴다. 예전엔 여기까지 들고 와 놓고 회사명과 직무명
+        # 두 문자열만 생성에 넘겼다 (검토 0.3).
+        ctx = gather_context(root,
+                             companies_dir=project_root() / 'companies',
+                             references_dir=project_root() / 'references' / 'coverletter',
+                             company=company, position=position,
+                             trends_base=trends_dir(), use_trends=use_trends, job=job)
+        for event, ev_data in generate_coverletter_events(
+                name, question, exp_dir,
+                company=company, position=position, length=length, context=ctx,
+                override_filenames=override_files,
+                allow_unresearched_company=allow_unresearched,
+                output_dir=output_dir(name), folder_name=folder_name,
+                complete=stream_complete):
             tagged = dict(ev_data)
             tagged['doc'] = 'coverletter'
             if event == 'done':
@@ -705,9 +251,6 @@ def generate_bundle(name):
                 coverletter_status = ev_data.get('status', STATUS_READY)
                 coverletter_issues = ev_data.get('issues', [])
                 coverletter_ok = (coverletter_status == STATUS_READY)
-                # S11-5: 이력서(lib/resume.py)와 포트폴리오는 output_dir 기준 상대경로를
-                # 돌려준다. 자소서만 프로젝트 루트 기준(saved_to)이라 화면이 세 경로를
-                # 다른 규칙으로 다뤄야 했다. rel_path 로 통일한다.
                 coverletter_path = ev_data.get('rel_path')
             elif event == 'error':
                 coverletter_error = ev_data.get('message')
