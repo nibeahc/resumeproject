@@ -13,6 +13,16 @@ from web import create_app  # noqa: E402
 from web.routes import generate as generate_route  # noqa: E402
 
 
+# S11-11: 제대로 조사된 기업 자료의 최소 형태 — 기업명, 확인일, 출처 URL.
+# 확인일을 오늘로 두어 시간이 지나도 stale 로 바뀌지 않게 한다.
+COMPANY_DOC = (
+    '# 테스트기업\n\n'
+    f'> 확인일: {__import__("datetime").date.today().isoformat()}\n'
+    '> 출처: https://example.com/about\n\n'
+    '핵심가치: 정확성\n'
+)
+
+
 def bounded(n, count_mode='포함'):
     return generate_route.LengthSpec(mode='bounded', hard_max_chars=n, count_mode=count_mode)
 
@@ -185,8 +195,9 @@ class GenerateRouteTest(unittest.TestCase):
         # 게이트 자체는 CompanyResearchGateTest 가 본다.
         self.companies = self.root / 'companies'
         self.companies.mkdir(parents=True)
-        (self.companies / '테스트기업.md').write_text('# 테스트기업\n\n핵심가치: 정확성',
-                                                      encoding='utf-8')
+        # S11-11: 기업 자료는 "파일이 있다" 만으로 통과하지 않는다. 기업명·확인일·출처가
+        # 있어야 조사 완료로 본다. 여기서는 제대로 조사된 상태를 전제로 깐다.
+        self.companies.joinpath('테스트기업.md').write_text(COMPANY_DOC, encoding='utf-8')
         # S11-9: 초안도 documents 테이블에 기록된다. DB_PATH 를 안 주면 이 클래스의
         # 테스트들이 실제 프로젝트 DB(data/app.db)에 쓴다 — GeneratePageTest 와
         # test_does_not_touch_real_project_db 가 막으려던 바로 그 사고다.
@@ -286,6 +297,64 @@ class GenerateRouteTest(unittest.TestCase):
             body = self.post().get_data(as_text=True)
         m.assert_not_called()
         self.assertIn('"needs_input": "company_research"', body)
+
+    def test_wrong_company_file_blocks(self):
+        """S11-11 / 설계검토 A-4: 파일명만 맞고 내용이 다른 기업이면 통과시키면 안 된다."""
+        (self.companies / '테스트기업.md').write_text(
+            COMPANY_DOC.replace('테스트기업', '전혀다른회사'), encoding='utf-8')
+        with patch.object(generate_route, 'stream_complete') as m:
+            body = self.post().get_data(as_text=True)
+        m.assert_not_called()
+        self.assertIn('"needs_input": "company_research"', body)
+        self.assertIn('mismatch', body)
+
+    def test_wrong_company_file_is_not_sent_even_when_user_consents(self):
+        """틀린 사실을 주느니 없는 게 낫다."""
+        (self.companies / '테스트기업.md').write_text(
+            COMPANY_DOC.replace('테스트기업', '전혀다른회사'), encoding='utf-8')
+        fake = llm_result('===ANSWER===\n' + '가' * 97 + '\n===END===\n===META===\nx\n===END===\n')
+        with patch.object(generate_route, 'stream_complete', return_value=fake) as m:
+            self.post(allow_unresearched=True).get_data()
+        sent = m.call_args.kwargs['messages'][0]['content']
+        self.assertNotIn('전혀다른회사', sent)
+        self.assertIn('단 하나도 쓰지 마세요', sent)
+
+    def test_company_file_without_source_is_flagged_but_not_blocked(self):
+        """오래됐다고 못 쓰게 하면 오히려 추론을 유도한다 — 막지 않고 알린다."""
+        (self.companies / '테스트기업.md').write_text('# 테스트기업\n\n핵심가치: 정확성',
+                                                       encoding='utf-8')
+        fake = llm_result('===ANSWER===\n' + '가' * 97 + '\n===END===\n===META===\nx\n===END===\n')
+        with patch.object(generate_route, 'stream_complete', return_value=fake) as m:
+            body = self.post().get_data(as_text=True)
+        self.assertEqual(m.call_count, 1)
+        self.assertIn('"company_evidence_thin"', body)
+        self.assertIn('"status": "review_required"', body)
+
+    def test_unverified_number_is_flagged(self):
+        """S11-11 / 설계검토 A-1: 경험 어디에도 없는 수치는 경보로 띄운다."""
+        answer = '매출을 ' + '37% 늘렸습니다. ' + '가' * 80
+        fake = llm_result(f'===ANSWER===\n{answer}\n===END===\n===META===\nx\n===END===\n')
+        with patch.object(generate_route, 'stream_complete', return_value=fake):
+            body = self.post(char_limit=len(answer)).get_data(as_text=True)
+        self.assertIn('"unverified_number"', body)
+        self.assertIn('"37"', body)
+
+    def test_middot_is_flagged_when_user_rule_forbids_it(self):
+        """S11-11: writing-rules.md 에 있어도 코드가 검사하지 않던 규칙."""
+        (self.root / 'users' / '홍길동' / 'writing-rules.md').write_text(
+            '- 가운뎃점(·) 사용 금지', encoding='utf-8')
+        answer = '데이터·분석을 했습니다. ' + '가' * 84
+        fake = llm_result(f'===ANSWER===\n{answer}\n===END===\n===META===\nx\n===END===\n')
+        with patch.object(generate_route, 'stream_complete', return_value=fake):
+            body = self.post(char_limit=len(answer)).get_data(as_text=True)
+        self.assertIn('"forbidden_character"', body)
+
+    def test_duplicate_override_is_flagged(self):
+        fake = llm_result('===ANSWER===\n' + '가' * 97 + '\n===END===\n===META===\nx\n===END===\n')
+        with patch.object(generate_route, 'stream_complete', return_value=fake):
+            body = self.post(experience_files=['2024-테스트경험.md',
+                                                '2024-테스트경험.md']).get_data(as_text=True)
+        self.assertIn('"duplicate_override"', body)
 
     def test_allow_unresearched_proceeds_but_flags(self):
         """동의하면 쓰되, ready 로 올리지 않고 파일에도 흔적을 남긴다."""
@@ -586,9 +655,8 @@ class GenerateBundleTest(unittest.TestCase):
             '# 테스트 경험\n\n## 메타\n\n- 카테고리: 리더십\n\n### Result (결과)\n\n성과를 냈다.',
             encoding='utf-8')
         (self.root / 'outputs' / '홍길동').mkdir(parents=True)
-        (self.root / 'companies').mkdir(parents=True)   # S11-1: 위와 같은 이유
-        (self.root / 'companies' / '테스트기업.md').write_text('# 테스트기업\n\n핵심가치: 정확성',
-                                                               encoding='utf-8')
+        (self.root / 'companies').mkdir(parents=True)   # S11-1, S11-11: 위와 같은 이유
+        (self.root / 'companies' / '테스트기업.md').write_text(COMPANY_DOC, encoding='utf-8')
         db.init_db(self.db_path)
         self.db = db
         conn = db.get_conn(self.db_path)

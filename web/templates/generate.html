@@ -269,6 +269,10 @@ const STAGE_LABEL = {
   draft: '초안 완료',
   retry: '글자수 보정 중...',
   selected: '경험 선택 완료',
+  company_evidence_weak: '⚠️ 기업 자료가 약함 (오래됐거나 출처 없음)',
+  duplicate_overrides: '⚠️ 같은 경험이 중복 지정됨',
+  unverified_facts: '⚠️ 출처에서 확인되지 않은 수치·기관명',
+  rule_violation: '⚠️ 작성 규칙 위반',
   plan: '논지 계획 확인',
   reviewing: '논지 검토 중...',
   reviewed: '검토 완료',
@@ -524,9 +528,24 @@ const ISSUE_LABELS = {
   unsupported_claim: '근거 없이 주장한 문장이 있음',
   new_unrelated_claim: '문단의 논지와 다른 주장이 섞임',
   fabricated_fact: '제공된 경험에 없는 사실로 보이는 서술이 있음',
+  company_evidence_stale: '기업 자료가 오래됐거나 확인일이 없음',
+  company_evidence_thin: '기업 자료에 출처 URL 이 없어 사실을 대조할 수 없음',
+  unverified_number: '경험·공고 어디에도 없는 수치가 있음 (단위 환산이나 파생 수치일 수도 있으니 확인 필요)',
+  unverified_organization: '경험·공고 어디에도 없는 기관명이 있음',
+  forbidden_character: '작성 규칙에서 금지한 문자가 들어감',
+  duplicate_override: '같은 경험을 중복 지정해 하나로 합쳐짐',
 };
 
 function issueLabel(code, data) {
+  if (code === 'unverified_number' && data && (data.unverified_numbers || []).length) {
+    return `출처에서 확인되지 않은 수치: ${data.unverified_numbers.join(', ')}`;
+  }
+  if (code === 'unverified_organization' && data && (data.unverified_organizations || []).length) {
+    return `출처에서 확인되지 않은 기관명: ${data.unverified_organizations.join(', ')}`;
+  }
+  if (code === 'forbidden_character' && data && (data.broken_rules || []).length) {
+    return `작성 규칙 위반: ${data.broken_rules.join(', ')}`;
+  }
   if (code === 'over_limit' && data) {
     return `글자수 제한 초과 (재시도 ${data.retries}회 후에도 ${data.chars - data.limit}자 초과)`;
   }

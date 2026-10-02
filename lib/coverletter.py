@@ -14,7 +14,7 @@
 import queue
 import re
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as dataclass_replace
 from datetime import date
 from pathlib import Path
 from typing import List, NamedTuple, Optional, Tuple
@@ -59,6 +59,15 @@ ISSUE_REVIEW_FAILED = 'review_failed'
 ISSUE_UNSUPPORTED_CLAIM = 'unsupported_claim'
 ISSUE_NEW_UNRELATED_CLAIM = 'new_unrelated_claim'
 ISSUE_FABRICATED_FACT = 'fabricated_fact'
+# S11-11 (설계검토 A-1, A-4, B-2): "코드로 강제하라" 고 한 것들 중 프롬프트에만 맡겨져 있던 것
+ISSUE_COMPANY_STALE = 'company_evidence_stale'
+ISSUE_COMPANY_THIN = 'company_evidence_thin'
+ISSUE_UNKNOWN_NUMBER = 'unverified_number'
+ISSUE_UNKNOWN_ORG = 'unverified_organization'
+ISSUE_FORBIDDEN_CHAR = 'forbidden_character'
+ISSUE_DUPLICATE_OVERRIDE = 'duplicate_override'
+
+COMPANY_EVIDENCE_MAX_AGE_DAYS = 90   # skills/write-coverletter.md Step 2 의 "90일" 을 코드로 옮긴다
 
 # 검토 결과 중 "사람이 반드시 봐야 하는" 유형. 나머지는 기록만 한다.
 BLOCKING_REVIEW_KINDS = frozenset({'unsupported_claim', 'new_unrelated_claim', 'fabricated_fact'})
@@ -357,6 +366,106 @@ def validate_cited_experiences(meta_text: str, supplied_filenames) -> Tuple[List
     return cited, unknown
 
 
+_DATE_IN_TEXT = re.compile(r'(\d{4})[-.년]\s*(\d{1,2})[-.월]\s*(\d{1,2})')
+_URL = re.compile(r'https?://\S+')
+
+
+def check_company_evidence(company: str, text: str, today: Optional[date] = None) -> List[str]:
+    """기업 자료가 "파일이 있다" 보다 강한 조건을 만족하는지 본다 (설계검토 A-4).
+
+    예전에는 `company_text.strip()` 한 줄이 전부여서, 빈 파일만 걸렀다. 출처 없는 요약,
+    다른 기업 내용이 담긴 파일, 2년 전 자료가 전부 "조사 완료" 로 통과했다.
+
+    돌려주는 사유 목록이 비면 통과다. 'mismatch' 는 호출자가 차단하고,
+    나머지(stale/thin)는 경고로 쓴다 — 오래됐다고 못 쓰게 하면 오히려 추론을 유도한다.
+    """
+    problems = []
+    if not text or not text.strip():
+        return ['empty']
+
+    # 1. 다른 기업 파일인가. 파일명만 맞고 내용이 다른 경우를 잡는다.
+    #    기업명은 ㈜, (주), 공백, 영문 병기 등 변형이 많아 핵심 음절만 비교한다.
+    core = re.sub(r'[\s㈜()（）주식회사\[\]]+', '', company)
+    if core and core not in re.sub(r'[\s㈜()（）주식회사\[\]]+', '', text):
+        problems.append('mismatch')
+
+    # 2. 언제 확인한 자료인가. 날짜가 아예 없거나 너무 오래됐으면 알린다.
+    today = today or date.today()
+    dates = []
+    for y, m, d in _DATE_IN_TEXT.findall(text):
+        try:
+            dates.append(date(int(y), int(m), int(d)))
+        except ValueError:
+            continue
+    if not dates:
+        problems.append('undated')
+    elif (today - max(dates)).days > COMPANY_EVIDENCE_MAX_AGE_DAYS:
+        problems.append('stale')
+
+    # 3. 출처가 있는가. URL 이 하나도 없으면 사실을 대조할 방법이 없다.
+    if not _URL.search(text):
+        problems.append('no_source')
+    return problems
+
+
+# 숫자는 기계적으로 대조할 수 있다. 다만 **경보지 허위 판정이 아니다** — 단위 환산,
+# 반올림, 파생 수치(둘을 더한 값 등)는 원문에 그대로 없을 수 있다 (설계검토 B-2).
+_NUMBER = re.compile(r'\d[\d,]*(?:\.\d+)?')
+# 기관명은 한국어 NER 없이 일반적으로 잡기 어렵다. 접미사가 붙은 것만 보수적으로 본다.
+_ORG_SUFFIX = re.compile(r'[가-힣A-Za-z0-9]{2,}(?:대학교|대학|고등학교|공사|공단|협회|학회|재단|'
+                          r'연구소|연구원|진흥원|센터|병원|은행|그룹|상사|물산)')
+
+
+def _normalize_number(s: str) -> str:
+    s = s.replace(',', '')
+    return s[:-1] if s.endswith('.') else s
+
+
+def find_unverified_facts(answer: str, sources: List[str]) -> Tuple[List[str], List[str]]:
+    """초안에 나온 수치와 기관명 중 어떤 출처에도 없는 것을 찾는다.
+    (미확인 수치, 미확인 기관명). 설계검토 A-1 의 "수치·기관명·역할의 불일치를 탐지".
+    """
+    haystack = '\n'.join(sources)
+    hay_numbers = {_normalize_number(n) for n in _NUMBER.findall(haystack)}
+    hay_text = re.sub(r'\s+', '', haystack)
+
+    numbers, orgs = [], []
+    for raw in _NUMBER.findall(answer):
+        n = _normalize_number(raw)
+        # 한 자리 수는 "첫 번째", "두 가지" 처럼 서술에서 자연히 나온다. 노이즈가 커서 뺀다.
+        if len(n.replace('.', '')) < 2:
+            continue
+        if n not in hay_numbers and n not in numbers:
+            numbers.append(n)
+    for org in _ORG_SUFFIX.findall(answer):
+        if re.sub(r'\s+', '', org) not in hay_text and org not in orgs:
+            orgs.append(org)
+    return numbers, orgs
+
+
+# 결정적으로 검사할 수 있는 개인 규칙만 등록한다. writing-rules.md 에 그 규칙이 실제로
+# 적혀 있을 때만 검사한다 — 모든 사용자에게 강제할 규칙이 아니기 때문이다.
+# (설계검토 C-2 의 구조화된 규칙 스키마로 가기 전의 최소 형태다.)
+CHECKABLE_RULES = [
+    {
+        'id': 'no-middot',
+        'detect': lambda rules: '가운뎃점' in rules and '금지' in rules,
+        'violation': lambda text: '·' in text,
+        'label': '가운뎃점(·)',
+    },
+]
+
+
+def check_personal_rules(answer: str, rules_text: str) -> List[str]:
+    """개인 규칙 중 코드가 판정할 수 있는 것만 검사한다.
+    예전엔 "가운뎃점 금지" 가 writing-rules.md 에 있어도 프롬프트에만 맡겨져 있었다."""
+    found = []
+    for rule in CHECKABLE_RULES:
+        if rule['detect'](rules_text or '') and rule['violation'](answer):
+            found.append(rule['label'])
+    return found
+
+
 def parse_answer(text):
     a = _ANSWER_BLOCK.search(text)
     m = _META_BLOCK.search(text)
@@ -623,18 +732,40 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
     # 흘릴 뿐 아무도 막지 않았고, 프롬프트가 오히려 "학습 데이터로 추론하라" 고 지시했다.
     # 이 레포에는 companies/*.md 를 **쓰는 코드 경로가 없어서**(수작업 파일이다) 캐시 미스가
     # 기본값에 가깝다 — 그래서 조용한 열화가 아니라 멈춤이어야 한다.
-    if not company_text.strip():
+    # S11-11 / 설계검토 A-4: "파일이 있다" 보다 강한 조건을 본다. 예전엔 strip() 한 줄이라
+    # 출처 없는 요약, 다른 기업 내용, 2년 전 자료가 전부 "조사 완료" 로 통과했다.
+    evidence_problems = check_company_evidence(company, company_text)
+    if {'empty', 'mismatch'} & set(evidence_problems):
+        reason = ('가 없습니다' if 'empty' in evidence_problems
+                  else '의 내용이 이 기업 자료로 보이지 않습니다 (기업명이 본문에 없습니다)')
         if not allow_unresearched_company:
             yield 'error', {
-                'message': f'companies/{company}.md 가 없습니다. 기업 자료 없이 쓰면 '
+                'message': f'companies/{company}.md {reason}. 기업 자료 없이 쓰면 '
                            f'사실관계를 지어낼 위험이 큽니다. 기업 조사를 먼저 하거나, '
                            f'공고 내용만으로 작성하는 데 동의해 주세요.',
                 'needs_input': 'company_research',
                 'company': company,
+                'evidence_problems': evidence_problems,
             }
             return
+        # 다른 기업 자료라면 넘기지 않는 편이 낫다. 틀린 사실을 주느니 없는 게 낫다.
+        # ctx 를 통째로 바꿔야 한다 — build_prompt 와 검토 입력이 ctx.company_text 를 읽는다
+        # (로컬 변수만 비웠다가 틀린 자료가 그대로 프롬프트에 실린 적이 있다).
+        company_text = ''
+        ctx = dataclass_replace(ctx, company_text='')
         issues.append(ISSUE_UNRESEARCHED_COMPANY)
-        yield 'progress', {'stage': 'unresearched_company', 'company': company}
+        yield 'progress', {'stage': 'unresearched_company', 'company': company,
+                            'evidence_problems': evidence_problems}
+    else:
+        # 막지는 않는다. 오래됐다고 못 쓰게 하면 오히려 추론을 유도한다 (설계검토 A-4).
+        if {'stale', 'undated'} & set(evidence_problems):
+            issues.append(ISSUE_COMPANY_STALE)
+        if 'no_source' in evidence_problems:
+            issues.append(ISSUE_COMPANY_THIN)
+        if evidence_problems:
+            yield 'progress', {'stage': 'company_evidence_weak',
+                                'problems': evidence_problems,
+                                'max_age_days': COMPANY_EVIDENCE_MAX_AGE_DAYS}
 
     # Step 5~7: 경험 선택은 LLM 이 아니라 코드가 한다 (S3-1). 선택된 것만 프롬프트에 실린다.
     selection = select_experiences(exp_dir, question, interest_text=ctx.interest_text,
@@ -653,6 +784,10 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
     if not selection['selected']:
         yield 'error', {'message': '사용할 경험이 하나도 선택되지 않았습니다. 경험을 선택한 뒤 다시 시도하세요.'}
         return
+    if selection['duplicate_overrides']:
+        issues.append(ISSUE_DUPLICATE_OVERRIDE)
+        yield 'progress', {'stage': 'duplicate_overrides',
+                            'duplicates': selection['duplicate_overrides']}
     if selection['dropped_overrides']:
         # 자르고 계속한다. 사용자가 고른 것을 통째로 버리는 것보다 낫지만, 고른 대로
         # 나오지 않았으니 사람이 확인해야 한다.
@@ -774,10 +909,32 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
         cited_, unknown_ = validate_cited_experiences(meta_text, supplied_filenames)
         if unknown_:
             found.append(ISSUE_CITED_UNKNOWN)
-        return found, n, over, plan_rows, cited_, unknown_
 
-    det, actual, exceeded, plan, cited_experiences, unknown_cited = deterministic_check(
+        # S11-11: 초안에 나온 수치·기관명이 어떤 출처에도 없으면 알린다. **경보지
+        # 허위 판정이 아니다** — 단위 환산, 반올림, 파생 수치는 원문에 그대로 없을 수 있다.
+        sources = [txt for _, txt in selected_experiences]
+        sources += [ctx.company_text, ctx.job_text, question]
+        nums, orgs = find_unverified_facts(answer_text, sources)
+        if nums:
+            found.append(ISSUE_UNKNOWN_NUMBER)
+        if orgs:
+            found.append(ISSUE_UNKNOWN_ORG)
+
+        # S11-11: 코드로 판정 가능한 개인 규칙(현재는 가운뎃점 금지). 예전엔
+        # writing-rules.md 에 적혀 있어도 프롬프트에만 맡겨져 있었다.
+        broken = check_personal_rules(answer_text, ctx.rules_text)
+        if broken:
+            found.append(ISSUE_FORBIDDEN_CHAR)
+        return found, n, over, plan_rows, cited_, unknown_, nums, orgs, broken
+
+    (det, actual, exceeded, plan, cited_experiences, unknown_cited,
+     unverified_numbers, unverified_orgs, broken_rules) = deterministic_check(
         result['text'], answer, meta)
+    if unverified_numbers or unverified_orgs:
+        yield 'progress', {'stage': 'unverified_facts',
+                            'numbers': unverified_numbers, 'organizations': unverified_orgs}
+    if broken_rules:
+        yield 'progress', {'stage': 'rule_violation', 'rules': broken_rules}
     if unknown_cited:
         yield 'progress', {'stage': 'cited_unknown', 'cited': cited_experiences,
                             'unknown': unknown_cited, 'supplied': supplied_filenames}
@@ -822,7 +979,8 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
                 else:
                     new_answer, new_meta = parse_answer(repaired['text'])
                     if new_answer:
-                        new_det, n2, over2, plan2, cited2, unknown2 = deterministic_check(
+                        (new_det, n2, over2, plan2, cited2, unknown2,
+                         nums2, orgs2, broken2) = deterministic_check(
                             repaired['text'], new_answer, new_meta)
                         # 검토 지적을 고치면서 글자수나 사실이 틀어졌다면 수정본을 버린다.
                         worse = set(new_det) - set(det)
@@ -833,6 +991,8 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
                             result, answer, meta = repaired, new_answer, new_meta
                             det, actual, exceeded = new_det, n2, over2
                             plan, cited_experiences, unknown_cited = plan2, cited2, unknown2
+                            unverified_numbers, unverified_orgs = nums2, orgs2
+                            broken_rules = broken2
                     else:
                         yield 'progress', {'stage': 'repair_failed', 'error': 'ANSWER 블록 없음'}
             # 수정 후에도(또는 수정 없이) 남은 차단성 지적은 사람에게 넘긴다.
@@ -936,6 +1096,9 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
         'full_document': full_document,
         # S11-10: 무엇을 어떻게 검사했는지 남긴다. 점수 하나로 통과/탈락을 가르지 않는다.
         'plan': plan,
+        'unverified_numbers': unverified_numbers,
+        'unverified_organizations': unverified_orgs,
+        'broken_rules': broken_rules,
         'review': review,
         'review_error': review_error,
         'repairs': repairs,

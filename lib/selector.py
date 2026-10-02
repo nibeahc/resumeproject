@@ -275,22 +275,36 @@ def select(exp_dir: Path, question: str, interest_text: str = '',
 
     반환: {'question_type', 'candidates', 'selected',
            'unknown_overrides': 존재하지 않는 파일명,
-           'dropped_overrides': 상한을 넘어 잘린 파일명}
+           'dropped_overrides': 상한을 넘어 잘린 파일명,
+           'duplicate_overrides': 중복 지정된 파일명}
     """
     experiences = load_all_experiences(exp_dir)
     q_type, candidates = rank_experiences(question, experiences, interest_text)
 
     unknown_overrides: List[str] = []
     dropped_overrides: List[str] = []
+    duplicate_overrides: List[str] = []
 
     if override_filenames:
         by_name = {c.experience.filename: c for c in candidates}
         unknown_overrides = [f for f in override_filenames if f not in by_name]
-        chosen = [by_name[f] for f in override_filenames if f in by_name]
+        # S11-11: 같은 파일을 두 번 지정하면 상한 2개를 "한 경험으로" 채워버린다.
+        # 조용히 중복 제거하되 보고한다 — 사용자가 다른 경험을 고르려던 것일 수 있다.
+        seen = set()
+        deduped = []
+        for f in override_filenames:
+            if f in seen:
+                if f not in duplicate_overrides:
+                    duplicate_overrides.append(f)
+                continue
+            seen.add(f)
+            deduped.append(f)
+        chosen = [by_name[f] for f in deduped if f in by_name]
         dropped_overrides = [c.experience.filename for c in chosen[max_count:]]
         selected = chosen[:max_count]
     else:
         selected = pick(candidates, max_count)
 
     return {'question_type': q_type, 'candidates': candidates, 'selected': selected,
-            'unknown_overrides': unknown_overrides, 'dropped_overrides': dropped_overrides}
+            'unknown_overrides': unknown_overrides, 'dropped_overrides': dropped_overrides,
+            'duplicate_overrides': duplicate_overrides}

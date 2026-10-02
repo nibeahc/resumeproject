@@ -7,6 +7,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -84,7 +85,12 @@ class EngineFixture:
             '# 테스트 경험\n\n## 메타\n\n- 카테고리: 리더십\n- 키워드: 리더십\n\n내용', encoding='utf-8')
         self.companies = self.tmp / 'companies'
         self.companies.mkdir()
-        (self.companies / '기업.md').write_text('# 기업\n\n핵심가치: 정확성', encoding='utf-8')
+        # S11-11: 기업명·확인일·출처가 있어야 조사 완료로 본다.
+        (self.companies / '기업.md').write_text(
+            '# 기업\n\n'
+            f'> 확인일: {date.today().isoformat()}\n'
+            '> 출처: https://example.com/about\n\n'
+            '핵심가치: 정확성\n', encoding='utf-8')
         self.references = self.tmp / 'references' / 'coverletter'
         self.references.mkdir(parents=True)
         self.out = self.tmp / 'outputs' / '홍길동'
@@ -383,3 +389,83 @@ class SecondExperienceTest(EngineFixture, unittest.TestCase):
         data = self.run_events(quality_check=True, complete=llm,
                                override_filenames=['2024-경험.md', '2023-둘째.md'])[-1][1]
         self.assertNotIn(C.ISSUE_SECOND_EXPERIENCE_UNJUSTIFIED, data['issues'])
+
+
+class CompanyEvidenceTest(unittest.TestCase):
+    """S11-11 / 설계검토 A-4: "파일이 있기만 하면 통과" 를 막는다."""
+
+    def doc(self, body, when=None):
+        when = when or date.today()
+        return f'# 테스트기업\n\n> 확인일: {when.isoformat()}\n> 출처: https://ex.com/a\n\n{body}'
+
+    def test_well_formed_passes(self):
+        self.assertEqual(C.check_company_evidence('테스트기업', self.doc('가치: 정확성')), [])
+
+    def test_empty_file(self):
+        self.assertEqual(C.check_company_evidence('테스트기업', '   '), ['empty'])
+
+    def test_other_company_content(self):
+        other = self.doc('가치: 정확성').replace('테스트기업', '다른기업')
+        self.assertIn('mismatch', C.check_company_evidence('테스트기업', other))
+
+    def test_company_name_variants_are_tolerated(self):
+        """㈜, 공백 같은 표기 차이로 오탐하면 안 된다."""
+        text = self.doc('가치').replace('테스트기업', '테스트기업㈜')
+        self.assertNotIn('mismatch', C.check_company_evidence('테스트 기업', text))
+
+    def test_stale_file(self):
+        from datetime import timedelta
+        old = date.today() - timedelta(days=C.COMPANY_EVIDENCE_MAX_AGE_DAYS + 1)
+        self.assertIn('stale', C.check_company_evidence('테스트기업', self.doc('가치', when=old)))
+
+    def test_undated_file(self):
+        self.assertIn('undated', C.check_company_evidence(
+            '테스트기업', '# 테스트기업\n\n> 출처: https://ex.com/a\n\n가치'))
+
+    def test_no_source_url(self):
+        self.assertIn('no_source', C.check_company_evidence(
+            '테스트기업', f'# 테스트기업\n\n> 확인일: {date.today().isoformat()}\n\n가치'))
+
+
+class UnverifiedFactsTest(unittest.TestCase):
+    """S11-11 / 설계검토 A-1: 수치·기관명 불일치 탐지. 경보이지 허위 판정이 아니다."""
+
+    def test_number_absent_from_sources_is_flagged(self):
+        nums, _ = C.find_unverified_facts('매출을 37% 늘렸습니다.', ['원문에는 12% 라고만 적혀 있다'])
+        self.assertEqual(nums, ['37'])
+
+    def test_number_present_in_sources_is_not_flagged(self):
+        nums, _ = C.find_unverified_facts('매출을 37% 늘렸습니다.', ['성과: 매출 37% 증가'])
+        self.assertEqual(nums, [])
+
+    def test_thousands_separator_is_normalised(self):
+        nums, _ = C.find_unverified_facts('1,200건을 처리했습니다.', ['처리 건수 1200건'])
+        self.assertEqual(nums, [])
+
+    def test_single_digits_are_ignored_as_noise(self):
+        nums, _ = C.find_unverified_facts('첫 번째로 3가지를 했습니다.', ['내용 없음'])
+        self.assertEqual(nums, [])
+
+    def test_unknown_organization_is_flagged(self):
+        _, orgs = C.find_unverified_facts('한국산업안전보건공단과 협업했습니다.', ['다른 내용'])
+        self.assertEqual(orgs, ['한국산업안전보건공단'])
+
+    def test_known_organization_is_not_flagged(self):
+        _, orgs = C.find_unverified_facts('인천대학교에서 수행했습니다.', ['기관명: 인천대학교'])
+        self.assertEqual(orgs, [])
+
+
+class PersonalRuleLintTest(unittest.TestCase):
+    """S11-11: writing-rules.md 에 적혀 있어도 코드가 검사하지 않던 규칙."""
+
+    RULES = '- 가운뎃점(·) 사용 금지. 대체 우선순위: ...'
+
+    def test_middot_flagged_when_rule_present(self):
+        self.assertEqual(C.check_personal_rules('데이터·분석을 했다', self.RULES), ['가운뎃점(·)'])
+
+    def test_clean_text_passes(self):
+        self.assertEqual(C.check_personal_rules('데이터와 분석을 했다', self.RULES), [])
+
+    def test_not_checked_when_user_has_no_such_rule(self):
+        """모든 사용자에게 강제할 규칙이 아니다. 규칙이 없으면 검사도 하지 않는다."""
+        self.assertEqual(C.check_personal_rules('데이터·분석', '- 다른 규칙만 있다'), [])

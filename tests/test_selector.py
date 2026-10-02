@@ -244,6 +244,12 @@ class SelectTest(unittest.TestCase):
         self.assertEqual([c.experience.filename for c in r['selected']], ['2022-a.md'])
         self.assertEqual(r['dropped_overrides'], ['2024-b.md'])
 
+    def test_override_중복은_제거하고_보고한다(self):
+        """S11-11: 같은 파일을 두 번 지정하면 상한 2개를 한 경험으로 채워버린다."""
+        r = S.select(self.tmp, '아무 질문', override_filenames=['2022-a.md', '2022-a.md'])
+        self.assertEqual([c.experience.filename for c in r['selected']], ['2022-a.md'])
+        self.assertEqual(r['duplicate_overrides'], ['2022-a.md'])
+
     def test_기본_상한은_Claude_md_의_2개(self):
         self.assertEqual(S.MAX_EXPERIENCES, 2)
 
