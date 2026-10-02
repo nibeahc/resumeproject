@@ -691,3 +691,24 @@ class ReviewSchemaTest(unittest.TestCase):
                              '"sentences": [{"id": "s1", "role": "unrelated", "supports": null}], '
                              '"issues": []}')
         self.assertIsNone(err)
+
+
+class GlossaryFactInteractionTest(EngineFixture, unittest.TestCase):
+    """실제 자소서를 쓰다 발견한 오탐. glossary 가 풀어 쓰라고 한 표현은 경험 원문에
+    그대로 없으므로, 그대로 두면 번역한 이름이 매번 '미확인 기관' 으로 잡힌다."""
+
+    def setUp(self):
+        super().setUp()
+        (self.user_root / 'glossary.md').write_text(
+            '## 풀어 써야 하는 이름\n\n| 원래 이름 | 자소서 표현 |\n|---|---|\n'
+            '| Hanze University of Applied Sciences | 한제대학교 |\n', encoding='utf-8')
+        (self.exp_dir / '2024-경험.md').write_text(
+            '# 교환학생\n\n## 메타\n\n- 기관명: Hanze University of Applied Sciences\n\n내용',
+            encoding='utf-8')
+
+    def test_glossary_gloss_counts_as_verified(self):
+        answer = '한제대학교에서 공부했습니다. ' + '가' * 83
+        llm = ScriptedLLM(draft(answer=answer, plan=None))
+        data = self.run_events(complete=llm, length=bounded(len(answer)))[-1][1]
+        self.assertNotIn(C.ISSUE_UNKNOWN_ORG, data['issues'])
+        self.assertEqual(data['unverified_organizations'], [])

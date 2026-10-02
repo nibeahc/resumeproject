@@ -1157,6 +1157,11 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
         # 허위 판정이 아니다** — 단위 환산, 반올림, 파생 수치는 원문에 그대로 없을 수 있다.
         sources = [txt for _, txt in selected_experiences]
         sources += [ctx.company_text, ctx.job_text, question]
+        # S11-12 와 맞물린 오탐 방지: glossary 가 "Hanze University of Applied Sciences
+        # → 한제대학교" 처럼 풀어 쓰라고 지시한 표현은 경험 원문에 그대로 없다. 사전에
+        # 등록된 설명형 표현과 허용 이름은 검증된 것으로 본다.
+        # (실제 자소서를 쓰다 '한제대학교' 가 미확인 기관으로 잡혀서 발견했다.)
+        sources += list(ctx.glossary.explain.values()) + list(ctx.glossary.allowed)
         nums, orgs = find_unverified_facts(answer_text, sources)
         if nums:
             found.append(ISSUE_UNKNOWN_NUMBER)
