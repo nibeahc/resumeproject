@@ -228,9 +228,9 @@ STAR 5항목 중 몇 개가 채워졌는지 보고해줘.
 ROADMAP.md 의 S3-5 를 수행해줘.
 
 문제: users/채빈/writing-rules.md 가 템플릿 예시 그대로 비어 있다.
-그런데 skills/write-coverletter.md Step 8 은 이 파일을
-writing-style.md 와 동일 가중치로 적용하라고 되어 있다.
+그런데 skills/write-coverletter.md Step 8 은 이 파일을 어투 근거로 쓴다.
 어투 시스템의 절반이 빈 채로 돌아가는 중이다.
+(※ 이 Task 는 2026-09-23 완료. 규칙 우선순위는 Claude.md "규칙 우선순위" 가 정본이다)
 
 skills/parse-experiences.md 를 고쳐서,
 writing-style.md 의 "피해야 할 표현" 분석으로부터
@@ -300,8 +300,8 @@ lib/sources/worknet.py 와 lib/sources/saramin.py 를 신설한다.
 - 워크넷(고용24): 공공데이터포털 https://www.data.go.kr/data/3038225/openapi.do , 무료
 - 사람인: https://oapi.saramin.co.kr/introduce , 키 신청 필요
 
-절대 금지: 채용 사이트 직접 스크래핑. 이용약관 위반이고
-로그인과 캡차로 계속 깨진다. 공식 API 만 쓴다.
+외부 자료 수집은 Claude.md 의 "외부 자료 수집 정책" 4단계를 따른다.
+이 Task 에서는 공식 API 만 쓴다 — 로그인·캡차 우회나 대량 수집은 금지 구간이다.
 API 키는 .env 에서 읽고 절대 커밋하지 않는다.
 
 그 다음 lib/dedup.py 로 중복을 제거한다.

@@ -47,7 +47,7 @@ def profile_setup_save(name):
 
     rules_content = f"""# {name} 작성 규칙
 
-> 사용자가 직접 설정한 규칙. writing-style.md 와 동일 가중치로 적용됨.
+> 사용자가 직접 설정한 규칙. 충돌 시 writing-style.md 보다 우선한다 (Claude.md "규칙 우선순위").
 
 ## 구조
 

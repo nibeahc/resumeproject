@@ -134,7 +134,8 @@ writing-style.md 생성 후, users/[이름]/writing-rules.md 를 함께 생성�
 # [이름] 작성 규칙
 
 > parse-experiences 가 writing-style.md 분석을 바탕으로 자동 생성한 초안입니다.
-> 확인 후 자유롭게 고치거나 항목을 추가하세요. writing-style.md 와 동일한 가중치로 적용됩니다.
+> 확인 후 자유롭게 고치거나 항목을 추가하세요.
+> 충돌 시 이 파일이 writing-style.md 보다 우선합니다 (`Claude.md` "규칙 우선순위").
 
 ## 구조
 

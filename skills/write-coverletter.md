@@ -27,7 +27,7 @@
 ### Step 1. 사용자 데이터 로드
 
 - `users/[이름]/writing-style.md` 읽기
-- `users/[이름]/writing-rules.md` 읽기 (writing-style.md와 동일한 가중치로 적용)
+- `users/[이름]/writing-rules.md` 읽기 (충돌 시 writing-style.md 보다 우선 — `Claude.md` "규칙 우선순위")
 - `users/[이름]/index.md` 읽기
 - `users/[이름]/관심직무.md` 읽기
 
