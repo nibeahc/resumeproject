@@ -712,3 +712,22 @@ class GlossaryFactInteractionTest(EngineFixture, unittest.TestCase):
         data = self.run_events(complete=llm, length=bounded(len(answer)))[-1][1]
         self.assertNotIn(C.ISSUE_UNKNOWN_ORG, data['issues'])
         self.assertEqual(data['unverified_organizations'], [])
+
+
+class DateFalsePositiveTest(unittest.TestCase):
+    """실사용 중 발견. 경험 원문의 "2026.01.12" 는 _NUMBER 에 "2026.01" 로 잡혀서,
+    초안의 "2026년" 이 미확인 수치로 걸렸다. 날짜는 환산·표기 차이일 뿐 창작이 아니다."""
+
+    def test_year_from_dotted_date_is_verified(self):
+        nums, _ = C.find_unverified_facts('2026년 1월부터 근무했습니다.',
+                                           ['- 시기: 2026.01.12 ~ 2026.02.27'])
+        self.assertEqual(nums, [])
+
+    def test_korean_date_form_also_works(self):
+        nums, _ = C.find_unverified_facts('2024년에 시작했습니다.', ['2024년 8월부터'])
+        self.assertEqual(nums, [])
+
+    def test_a_year_that_is_nowhere_is_still_flagged(self):
+        """오탐만 줄이고 진짜 미확인 수치는 그대로 잡아야 한다."""
+        nums, _ = C.find_unverified_facts('2019년에 수상했습니다.', ['- 시기: 2026.01.12'])
+        self.assertEqual(nums, ['2019'])

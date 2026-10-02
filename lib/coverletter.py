@@ -438,6 +438,9 @@ _NUMBER = re.compile(r'\d[\d,]*(?:\.\d+)?')
 # 기관명은 한국어 NER 없이 일반적으로 잡기 어렵다. 접미사가 붙은 것만 보수적으로 본다.
 _ORG_SUFFIX = re.compile(r'[가-힣A-Za-z0-9]{2,}(?:대학교|대학|고등학교|공사|공단|협회|학회|재단|'
                           r'연구소|연구원|진흥원|센터|병원|은행|그룹|상사|물산)')
+# 날짜는 "2026.01.12" 로 적힌 원문이 _NUMBER 에 "2026.01" 로 잡혀, 초안의 "2026년" 과
+# 어긋난다. 연/월/일을 따로 등록해 이 오탐을 막는다 (실제 자소서를 쓰다 발견했다).
+_DATE_TOKENS = re.compile(r'(\d{4})\s*[.\-/년]\s*(\d{1,2})(?:\s*[.\-/월]\s*(\d{1,2}))?')
 
 
 def _normalize_number(s: str) -> str:
@@ -451,6 +454,9 @@ def find_unverified_facts(answer: str, sources: List[str]) -> Tuple[List[str], L
     """
     haystack = '\n'.join(sources)
     hay_numbers = {_normalize_number(n) for n in _NUMBER.findall(haystack)}
+    for parts in _DATE_TOKENS.findall(haystack):
+        hay_numbers.update(p.lstrip('0') or '0' for p in parts if p)
+        hay_numbers.update(p for p in parts if p)
     hay_text = re.sub(r'\s+', '', haystack)
 
     numbers, orgs = [], []
