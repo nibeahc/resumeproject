@@ -86,6 +86,11 @@ class GenerateWithoutFlaskTest(unittest.TestCase):
         self.references.mkdir(parents=True)
         self.out = self.tmp / 'outputs' / '홍길동'
         self.out.mkdir(parents=True)
+        # S11-9: 초안도 documents 테이블에 기록된다. db_path 를 안 주면 lib.db 가
+        # 실제 프로젝트 DB(data/app.db)를 쓴다 — 실제로 이 파일을 처음 돌렸을 때 그랬다.
+        self.db_path = self.tmp / 'app.db'
+        from lib import db
+        db.init_db(self.db_path)
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -98,9 +103,72 @@ class GenerateWithoutFlaskTest(unittest.TestCase):
 
     def run_events(self, **kw):
         params = dict(company='기업', position='직무', length=bounded(100),
-                      context=self.ctx(), output_dir=self.out, complete=fake_complete())
+                      context=self.ctx(), output_dir=self.out, db_path=self.db_path,
+                      complete=fake_complete())
         params.update(kw)
         return list(C.generate_coverletter_events('홍길동', '지원 동기', self.exp_dir, **params))
+
+    def test_does_not_touch_real_project_db(self):
+        """S11-9 회귀 방지: db_path 를 안 넘기면 lib.db 가 실제 data/app.db 를 쓴다.
+        이 파일을 처음 돌렸을 때 실제로 홍길동 행 3개가 프로젝트 DB 에 들어갔다."""
+        from lib import db as real_db
+        self.run_events()
+        conn = real_db.get_conn()          # db_path 생략 → 실제 프로젝트 DB
+        try:
+            n = conn.execute("SELECT COUNT(*) AS c FROM documents WHERE user = '홍길동'").fetchone()['c']
+        finally:
+            conn.close()
+        self.assertEqual(n, 0)
+
+    def test_saves_version_and_documents_row(self):
+        """S11-9: 예전엔 사람이 편집기에서 저장하기 전까지 버전 이력이 없었다."""
+        from lib import db as real_db, versions
+        events = self.run_events()
+        data = events[-1][1]
+        self.assertEqual(data['version'], 1)
+        self.assertTrue((self.out / '기업_직무' / '자소서' / 'v1.md').exists())
+        conn = real_db.get_conn(self.db_path)
+        try:
+            rows = conn.execute("SELECT kind, version FROM documents WHERE user = '홍길동'").fetchall()
+        finally:
+            conn.close()
+        self.assertEqual([dict(r) for r in rows], [{'kind': 'coverletter', 'version': 1}])
+        self.assertEqual(len(versions.list_versions(self.out, '기업_직무/자소서.md', '홍길동',
+                                                     db_path=self.db_path)), 1)
+
+    def test_second_question_adds_version_two(self):
+        self.run_events()
+        list(C.generate_coverletter_events(
+            '홍길동', '두 번째 문항', self.exp_dir, company='기업', position='직무',
+            length=bounded(100), context=self.ctx(), output_dir=self.out,
+            db_path=self.db_path, complete=fake_complete()))
+        self.assertTrue((self.out / '기업_직무' / '자소서' / 'v2.md').exists())
+        text = (self.out / '기업_직무' / '자소서.md').read_text(encoding='utf-8')
+        self.assertIn('지원 동기', text)       # 앞 문항이 보존되어야 한다
+        self.assertIn('두 번째 문항', text)
+
+    def test_cited_unknown_experience_flagged(self):
+        """S11-9: 모델이 주지 않은 파일을 인용했다고 보고하면 사람이 봐야 한다."""
+        events = self.run_events(
+            complete=fake_complete(meta='참조한 경험: 없는 경험 (2099-가짜.md)'))
+        data = events[-1][1]
+        self.assertEqual(data['status'], C.STATUS_REVIEW_REQUIRED)
+        self.assertIn(C.ISSUE_CITED_UNKNOWN, data['issues'])
+        self.assertEqual(data['cited_experiences'], ['2099-가짜.md'])
+        self.assertEqual(data['used_experiences'], ['2024-경험.md'])
+
+    def test_correct_citation_is_ready(self):
+        events = self.run_events(complete=fake_complete(meta='참조한 경험: 테스트 경험 (2024-경험.md)'))
+        data = events[-1][1]
+        self.assertEqual(data['status'], C.STATUS_READY)
+        self.assertEqual(data['cited_experiences'], ['2024-경험.md'])
+
+    def test_citation_without_filename_is_not_penalised(self):
+        """파일명을 안 적는 형식도 있다. 대조할 대상이 없을 뿐 감점 사유는 아니다."""
+        events = self.run_events(complete=fake_complete(meta='참조한 경험: 테스트 경험'))
+        data = events[-1][1]
+        self.assertEqual(data['status'], C.STATUS_READY)
+        self.assertEqual(data['cited_experiences'], [])
 
     def test_generates_and_saves_without_app_context(self):
         events = self.run_events()

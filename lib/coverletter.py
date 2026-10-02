@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import List, NamedTuple, Optional, Tuple
 
 from lib import trends as trends_module
+from lib import versions
 from lib.llm import stream_complete
 from lib.resume import _safe_folder_name
 from lib.selector import MAX_EXPERIENCES
@@ -47,6 +48,7 @@ ISSUE_OVER_LIMIT = 'over_limit'
 ISSUE_UNDERSHOOT = 'undershoot'
 ISSUE_DROPPED_OVERRIDES = 'dropped_overrides'
 ISSUE_UNRESEARCHED_COMPANY = 'unresearched_company'
+ISSUE_CITED_UNKNOWN = 'cited_unknown_experience'
 
 
 class LengthSpec(NamedTuple):
@@ -295,6 +297,35 @@ def build_retry_prompt(length: 'LengthSpec', current_count, company=''):
 """
 
 
+_CITED_LINE = re.compile(r'^참조한 경험:\s*(.+)$', re.M)
+_MD_FILENAME = re.compile(r'([^\s()\[\],]+\.md)')
+
+
+def validate_cited_experiences(meta_text: str, supplied_filenames) -> Tuple[List[str], List[str]]:
+    """META 의 "참조한 경험" 줄에 적힌 파일명이 실제로 프롬프트에 실린 파일인지 대조한다.
+    (인용된 목록, 제공되지 않은 목록) 을 돌려준다.
+
+    lib/matcher.py 의 _validate_evidence 와 같은 원칙이다 — 모델의 자기보고를 믿지 않고
+    코드가 실재 여부를 확인한다. 거기서는 근거 파일이 없는 판정을 미충족으로 강등하고,
+    여기서는 status 를 review_required 로 내린다.
+
+    설계검토 A-4 가 요구한 selected(코드가 준 것) vs actually_cited(글이 쓴 것) 분리를
+    이 15줄로 얻는다. 다만 **파일명 대조일 뿐**이다 — 모델이 파일명을 맞게 적고도 그 경험에
+    없는 내용을 썼는지는 알 수 없다. 그 판정은 S11-10 의 검토 호출이 맡는다.
+
+    모델이 파일명을 아예 안 적었으면(경험명만 적는 경우) 대조할 대상이 없으므로 빈 목록을
+    돌려준다. 형식을 안 지켰다는 이유로 감점하지는 않는다.
+    """
+    supplied = set(supplied_filenames)
+    cited = []
+    for line in _CITED_LINE.findall(meta_text or ''):
+        for fn in _MD_FILENAME.findall(line):
+            if fn not in cited:
+                cited.append(fn)
+    unknown = [fn for fn in cited if fn not in supplied]
+    return cited, unknown
+
+
 def parse_answer(text):
     a = _ANSWER_BLOCK.search(text)
     m = _META_BLOCK.search(text)
@@ -397,6 +428,7 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
                                  allow_unresearched_company: bool = False,
                                  output_dir: Optional[Path] = None,
                                  folder_name: Optional[str] = None,
+                                 db_path=None,
                                  complete=None):
     """자소서 한 문항을 생성하고 (event, data) 튜플을 yield 하는 제너레이터.
 
@@ -558,6 +590,14 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
     elif needs_retry:
         issues.append(ISSUE_UNDERSHOOT)
 
+    # S11-9: 모델이 "참조한 경험" 으로 적은 파일명이 실제로 준 파일인지 대조한다.
+    supplied_filenames = [fn for fn, _ in selected_experiences]
+    cited_experiences, unknown_cited = validate_cited_experiences(meta, supplied_filenames)
+    if unknown_cited:
+        issues.append(ISSUE_CITED_UNKNOWN)
+        yield 'progress', {'stage': 'cited_unknown', 'cited': cited_experiences,
+                            'unknown': unknown_cited, 'supplied': supplied_filenames}
+
     # S7 부터 이력서(lib/resume.py)·포트폴리오(lib/portfolio.py)가 outputs/[이름]/[기업]_[직무]/
     # 서브폴더에 저장하기 시작했다. 자소서만 플랫 파일로 따로 두면 S7-3(일괄 생성)에서 세 문서가
     # 한 폴더에 모이지 않으니, 여기도 같은 서브폴더 구조로 맞춘다.
@@ -573,7 +613,8 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
             'count_mode': length.count_mode, 'exceeded': exceeded, 'retries': retries,
             'status': STATUS_REVIEW_REQUIRED if issues else STATUS_READY,
             'issues': issues, 'saved_to': None, 'rel_path': None,
-            'used_experiences': [fn for fn, _ in selected_experiences],
+            'used_experiences': supplied_filenames,
+            'cited_experiences': cited_experiences,
         }
         return
 
@@ -603,12 +644,25 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
 {meta}
 작성일: {today}
 """
+    # 자소서는 문항별 append 구조다. 전문을 만들어 넘겨야 버전이 "그 시점의 문서 전체" 가 된다.
     if out_path.exists():
-        out_path.write_text(out_path.read_text(encoding='utf-8').rstrip() + '\n\n' + entry, encoding='utf-8')
+        full_document = out_path.read_text(encoding='utf-8').rstrip() + '\n\n' + entry
     else:
-        out_path.write_text(f'# {company} {position}\n\n{entry}', encoding='utf-8')
+        full_document = f'# {company} {position}\n\n{entry}'
 
     rel_path = str(out_path.relative_to(out_dir)).replace('\\', '/')
+
+    # S11-9: 생성 초안도 버전으로 남긴다. 예전엔 lib/versions.save_version 이
+    # web/routes/documents.py 의 수동 편집 저장에서만 불려서, 사람이 한 번 고치기 전까지
+    # 이력이 없었다. 설계검토 E-3 의 초안↔최종본 diff 수집은 이 기록이 전제다.
+    version = None
+    try:
+        vr = versions.save_version(out_dir, rel_path, full_document, user=name, db_path=db_path)
+        version = vr.version if vr.ok else None
+    except Exception as e:  # noqa: BLE001
+        # DB 문제로 **초안을 잃지는 않는다.** 파일은 직접 쓰고 기록 실패만 알린다.
+        out_path.write_text(full_document, encoding='utf-8')
+        yield 'progress', {'stage': 'version_save_failed', 'error': str(e)}
     yield 'done', {
         'answer': answer,
         'meta': meta,
@@ -629,5 +683,9 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
         # outputs/<user>/ 를 다시 떼어내야 한다(예전엔 파일명만 떼어 서브폴더를 잃었다).
         # rel_path 는 /output/<user>/<path:filename> 라우트에 그대로 붙일 수 있는 형태다.
         'rel_path': rel_path,
-        'used_experiences': [fn for fn, _ in selected_experiences],  # 코드가 실제로 고른 파일 (LLM 자체보고가 아니다)
+        'used_experiences': supplied_filenames,   # 코드가 고른 파일 (사실)
+        # S11-9: 모델이 썼다고 보고한 파일 (자기보고). 둘을 나란히 두면 어긋남이 보인다.
+        'cited_experiences': cited_experiences,
+        'version': version,
+        'full_document': full_document,
     }

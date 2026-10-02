@@ -22,12 +22,13 @@ from flask import (Blueprint, Response, current_app, jsonify, redirect, render_t
                    request, stream_with_context, url_for)
 
 from lib import db, matcher, portfolio, resume
-from lib.coverletter import (ISSUE_DROPPED_OVERRIDES, ISSUE_OVER_LIMIT,  # noqa: F401 (재노출)
-                             ISSUE_UNDERSHOOT, ISSUE_UNRESEARCHED_COMPANY, LENGTH_TOLERANCE,
-                             MAX_CHAR_LIMIT, MAX_RETRIES, STATUS_READY, STATUS_REVIEW_REQUIRED,
-                             TARGET_UNDERSHOOT, LengthSpec, build_prompt, build_retry_prompt,
-                             count_chars, gather_context, generate_coverletter_events,
-                             parse_answer, read_if_exists, strip_placeholder_rules)
+from lib.coverletter import (ISSUE_CITED_UNKNOWN, ISSUE_DROPPED_OVERRIDES,  # noqa: F401 (재노출)
+                             ISSUE_OVER_LIMIT, ISSUE_UNDERSHOOT, ISSUE_UNRESEARCHED_COMPANY,
+                             LENGTH_TOLERANCE, MAX_CHAR_LIMIT, MAX_RETRIES, STATUS_READY,
+                             STATUS_REVIEW_REQUIRED, TARGET_UNDERSHOOT, LengthSpec, build_prompt,
+                             build_retry_prompt, count_chars, gather_context,
+                             generate_coverletter_events, parse_answer, read_if_exists,
+                             strip_placeholder_rules, validate_cited_experiences)
 from lib.llm import stream_complete
 from lib.resume import _safe_folder_name
 from web.data import get_open_jobs
@@ -149,13 +150,17 @@ def generate(name):
                          company=company, position=position,
                          trends_base=trends_dir(), use_trends=use_trends)
 
+    # S11-9: 초안도 documents 에 기록하므로 이 라우트도 DB 를 건드린다. 테스트가
+    # DB_PATH 를 주지 않으면 실제 data/app.db 를 쓰게 되므로 _db_path() 를 거친다.
+    db_path = _db_path()
+
     def stream():
         for event, ev_data in generate_coverletter_events(
                 name, question, root / 'experiences',
                 company=company, position=position, length=length, context=ctx,
                 override_filenames=override_files,
                 allow_unresearched_company=allow_unresearched,
-                output_dir=output_dir(name), complete=stream_complete):
+                output_dir=output_dir(name), db_path=db_path, complete=stream_complete):
             yield sse(event, ev_data)
 
     return Response(stream_with_context(stream()), mimetype='text/event-stream')
@@ -242,7 +247,7 @@ def generate_bundle(name):
                 override_filenames=override_files,
                 allow_unresearched_company=allow_unresearched,
                 output_dir=output_dir(name), folder_name=folder_name,
-                complete=stream_complete):
+                db_path=db_path, complete=stream_complete):
             tagged = dict(ev_data)
             tagged['doc'] = 'coverletter'
             if event == 'done':

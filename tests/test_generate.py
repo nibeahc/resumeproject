@@ -187,7 +187,11 @@ class GenerateRouteTest(unittest.TestCase):
         self.companies.mkdir(parents=True)
         (self.companies / '테스트기업.md').write_text('# 테스트기업\n\n핵심가치: 정확성',
                                                       encoding='utf-8')
-        app = create_app({'PROJECT_ROOT': self.root, 'TESTING': True})
+        # S11-9: 초안도 documents 테이블에 기록된다. DB_PATH 를 안 주면 이 클래스의
+        # 테스트들이 실제 프로젝트 DB(data/app.db)에 쓴다 — GeneratePageTest 와
+        # test_does_not_touch_real_project_db 가 막으려던 바로 그 사고다.
+        app = create_app({'PROJECT_ROOT': self.root, 'DB_PATH': self.tmp / 'app.db',
+                           'TESTING': True})
         self.c = app.test_client()
 
     def tearDown(self):
