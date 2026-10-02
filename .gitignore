@@ -5,6 +5,8 @@ companies/*.md
 _trash/
 
 # 시스템 파일
+# (2026-10-02: 여기 적혀 있는데도 계속 변경으로 떴다 — 이 줄이 추가되기 전에 이미
+#  추적되고 있어서였다. git rm --cached 로 추적을 끊었다)
 .DS_Store
 
 # 파이썬
@@ -18,6 +20,7 @@ __pycache__/
 # 개발 기록 (내부용)
 record/development report*.md
 record/handoff_*.md
+record/세션기록_*.md
 HANDOFF.md
 
 # 서비스 데이터 (ROADMAP S0 이후)
