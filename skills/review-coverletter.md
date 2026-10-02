@@ -59,11 +59,14 @@
 ```text
 ===REVIEW===
 {
-  "inferred_claim": "초안만 읽고 파악한 핵심 주장 한 문장",
+  "inferred_claim": "초안 전체에서 읽히는 핵심 주장 한 문장",
+  "paragraphs": [
+    {"id": "p1", "inferred_claim": "이 문단에서 읽히는 주장"}
+  ],
   "sentences": [
-    {"id": "s1", "role": "claim"},
-    {"id": "s2", "role": "evidence"},
-    {"id": "s3", "role": "unrelated"}
+    {"id": "s1", "role": "claim", "supports": "p1", "fact_ids": []},
+    {"id": "s2", "role": "evidence", "supports": "p1", "fact_ids": ["2026-인턴십.md"]},
+    {"id": "s3", "role": "unrelated", "supports": null, "fact_ids": []}
   ],
   "issues": [
     {"sentence_ids": ["s3"], "kind": "new_unrelated_claim",
@@ -72,5 +75,10 @@
 }
 ===END===
 ```
+
+- `paragraphs` : 빈 줄로 나뉜 문단마다 하나. 문단이 하나면 `p1` 하나만 쓴다.
+- `supports` : 그 문장이 어느 문단의 주장에 기여하는가. 기여하지 않으면 `null`.
+- `fact_ids` : 그 문장이 쓴 사실의 출처 **파일명**. 입력의 "사실 출처" 에 있는 이름만 쓴다.
+  사실을 쓰지 않는 문장(주장, 전환 등)은 빈 배열.
 
 문제가 없으면 `issues` 를 빈 배열로 둔다. 억지로 채우지 않는다.

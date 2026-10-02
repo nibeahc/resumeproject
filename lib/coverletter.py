@@ -68,6 +68,7 @@ ISSUE_FORBIDDEN_CHAR = 'forbidden_character'
 ISSUE_DUPLICATE_OVERRIDE = 'duplicate_override'
 ISSUE_UNEXPLAINED_NAME = 'unexplained_name'   # S11-12
 ISSUE_SECTION_NOT_FOUND = 'section_not_found'  # S11-13
+ISSUE_PLAN_MISSING_WARRANT = 'plan_missing_warrant'  # S11-14
 
 COMPANY_EVIDENCE_MAX_AGE_DAYS = 90   # skills/write-coverletter.md Step 2 의 "90일" 을 코드로 옮긴다
 
@@ -205,11 +206,16 @@ def build_prompt(name, company, position, question, length: 'LengthSpec',
     multi = len(selected_experiences) > 1
     # want_plan=False 면 PLAN 을 요구하지 않는다. 논지 계획은 품질 검사 기능의 일부이고,
     # 검사를 끈 호출에 계획만 받아봐야 아무도 보지 않는다 (토큰만 쓴다).
+    has_job = bool(ctx.job_text.strip())
     plan_block = '' if not want_plan else f'''===PLAN===
-(문단마다 한 줄. 파이프로 구분. 설명 없이 표만)
-문단id | 이 문단의 핵심 주장 한 문장 | 답하는 문항 요구사항 | 쓸 경험 파일명 | {'두 번째 경험의 역할' if multi else '-'}
-예시: p1 | 반복 업무의 정확성이 전체 운영 신뢰로 이어진다고 본다 | 지원 이유 | 2026-인턴십.md | -
-{'두 경험을 모두 쓴다면, 두 번째가 같은 주장을 보강하는지 / 대조하는지 / 변화 과정을 보여주는지를 적으세요. "둘 다 분석 경험" 은 이유가 아닙니다. 두 번째를 지웠을 때 논증에서 무엇이 사라지는지 말할 수 없다면 쓰지 마세요.' if multi else '경험이 하나이므로 마지막 칸은 - 로 둡니다.'}
+(문단마다 한 줄. 파이프로 구분한 6칸. 설명 없이 표만)
+문단id | 핵심 주장 한 문장 | 답하는 문항 요구사항 | 쓸 경험 파일명 | 그 경험이 왜 이 주장을 뒷받침하는지 | {'연결할 공고 요구조건' if has_job else '-'} | {'두 번째 경험의 역할' if multi else '-'}
+예시: p1 | 반복 업무의 정확성이 전체 운영 신뢰로 이어진다고 본다 | 지원 이유 | 2026-인턴십.md | 선적서류 오류를 줄인 경험이 "정확성이 신뢰를 만든다" 는 판단의 근거다 | - | -
+
+- 다섯 번째 칸(뒷받침하는 이유)은 비워두지 마세요. 경험과 주장 사이를 잇는 설명이 없으면
+  읽는 사람은 "그래서?" 로 남습니다.
+{'- 여섯 번째 칸에는 공고의 실제 요구조건을 적으세요. 억지로 연결할 필요는 없고, 해당 없으면 - 로 둡니다.' if has_job else ''}
+{'- 마지막 칸: 두 경험을 모두 쓴다면 두 번째가 같은 주장을 보강하는지 / 대조하는지 / 변화 과정을 보여주는지 적으세요. "둘 다 분석 경험" 은 이유가 아닙니다. 두 번째를 지웠을 때 논증에서 무엇이 사라지는지 말할 수 없다면 쓰지 마세요.' if multi else '- 경험이 하나이므로 마지막 칸은 - 로 둡니다.'}
 ===END===
 
 '''
@@ -716,9 +722,17 @@ def parse_plan(text: str) -> List[dict]:
         cells = [c.strip() for c in line.split('|')]
         if len(cells) < 4 or cells[0].startswith('문단id'):
             continue
+        def cell(i):
+            v = cells[i].strip() if len(cells) > i else ''
+            return '' if v in ('-', '—', 'N/A') else v
+
         rows.append({'id': cells[0], 'claim': cells[1], 'requirement': cells[2],
                       'experiences': [f for f in _MD_FILENAME.findall(cells[3])],
-                      'second_role': cells[4] if len(cells) > 4 else ''})
+                      # S11-14: 설계검토 B-1 의 "연결 설명(warrant)" 과 JD 요구조건.
+                      # 근거와 주장 사이를 잇는 설명이 없으면 읽는 사람은 "그래서?" 로 남는다.
+                      'warrant': cell(4),
+                      'job_requirement': cell(5),
+                      'second_role': cell(6)})
     return rows
 
 
@@ -730,6 +744,9 @@ def lint_plan(plan: List[dict], supplied_filenames) -> List[str]:
     supplied = set(supplied_filenames)
     if any(fn not in supplied for row in plan for fn in row['experiences']):
         issues.append(ISSUE_PLAN_UNKNOWN_EXPERIENCE)
+    # S11-14: 근거가 왜 주장을 지지하는지 설명하지 못하면 논증이 아니라 나열이다.
+    if any(not row['warrant'] for row in plan):
+        issues.append(ISSUE_PLAN_MISSING_WARRANT)
     # 경험을 둘 쓰면서 두 번째의 역할을 못 적었다면, 왜 둘인지 설명하지 못한 것이다.
     if len(supplied) > 1:
         used = {fn for row in plan for fn in row['experiences']}
@@ -747,7 +764,8 @@ def build_review_input(question: str, draft: str, *, job_text: str = '',
     exp_block = '\n'.join(f'--- {fn} ---\n{text}' for fn, text in allowed_experiences)
     parts = [f'[문항]\n{question}', f'[초안 — 문장 ID 가 붙어 있습니다]\n{numbered}']
     if exp_block:
-        parts.append('[이 글이 쓸 수 있는 유일한 사실 출처]\n' + exp_block)
+        parts.append('[이 글이 쓸 수 있는 유일한 사실 출처 — fact_ids 에는 아래 파일명을 씁니다]\n'
+                      + exp_block)
     if company_text.strip():
         parts.append('[확인된 기업 자료]\n' + company_text.strip())
     if job_text.strip():
@@ -756,9 +774,14 @@ def build_review_input(question: str, draft: str, *, job_text: str = '',
     return '\n\n'.join(parts)
 
 
-def parse_review(text: str, expected_ids) -> Tuple[Optional[dict], Optional[str]]:
+def parse_review(text: str, expected_ids, allowed_fact_ids=()) -> Tuple[Optional[dict], Optional[str]]:
     """(검토 결과, 실패 사유). 문장 ID 가 우리가 보낸 집합과 어긋나면 실패로 본다 —
-    엉뚱한 문장을 가리키는 지적은 고칠 수가 없다 (설계검토 B-2)."""
+    엉뚱한 문장을 가리키는 지적은 고칠 수가 없다 (설계검토 B-2).
+
+    S11-14: 문단 구분(paragraphs), 문장이 지지하는 주장(supports), 근거 출처(fact_ids)까지
+    검증한다. fact_ids 는 설계검토의 "E01.A2" 같은 활동 단위가 아니라 **경험 파일명**이다 —
+    이 레포의 경험 DB 에 활동 단위 ID 가 없어서다. 파일명 수준에서만 대조할 수 있다.
+    """
     import json as _json
     m = _REVIEW_BLOCK.search(text or '')
     if not m:
@@ -776,6 +799,16 @@ def parse_review(text: str, expected_ids) -> Tuple[Optional[dict], Optional[str]
         missing = sorted(expected - got)
         extra = sorted(got - expected)
         return None, f'문장 ID 불일치 (누락 {missing}, 없는 ID {extra})'
+
+    paragraph_ids = {p.get('id') for p in data.get('paragraphs', []) if isinstance(p, dict)}
+    allowed_facts = set(allowed_fact_ids)
+    for s in data.get('sentences', []):
+        supports = s.get('supports')
+        if supports and paragraph_ids and supports not in paragraph_ids:
+            return None, f'없는 문단을 가리킴: {supports}'
+        unknown_facts = set(s.get('fact_ids') or []) - allowed_facts
+        if allowed_facts and unknown_facts:
+            return None, f'제공하지 않은 근거를 인용함: {sorted(unknown_facts)}'
 
     for issue in data.get('issues', []):
         if not isinstance(issue, dict):
@@ -1167,7 +1200,8 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
         try:
             review_raw = yield from call_llm([{'role': 'user', 'content': review_input}],
                                               system=load_skill('review-coverletter'))
-            review, review_error = parse_review(review_raw['text'], sentence_ids)
+            review, review_error = parse_review(review_raw['text'], sentence_ids,
+                                                 allowed_fact_ids=supplied_filenames)
         except RuntimeError as e:
             review_error = f'검토 호출 실패: {e}'
 

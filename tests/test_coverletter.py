@@ -241,7 +241,9 @@ if __name__ == '__main__':
     unittest.main()
 
 
-PLAN_OK = '===PLAN===\np1 | 정확성이 신뢰로 이어진다 | 지원 이유 | 2024-경험.md | -\n===END==='
+PLAN_OK = ('===PLAN===\n'
+           'p1 | 정확성이 신뢰로 이어진다 | 지원 이유 | 2024-경험.md | 오류를 줄인 경험이 그 판단의 근거다 | - | -\n'
+           '===END===')
 
 
 def draft(answer='가' * 97, plan=PLAN_OK, meta='참조한 경험: 테스트 경험 (2024-경험.md)'):
@@ -249,10 +251,13 @@ def draft(answer='가' * 97, plan=PLAN_OK, meta='참조한 경험: 테스트 경
     return llm_result(f'{body}===ANSWER===\n{answer}\n===END===\n===META===\n{meta}\n===END===\n')
 
 
-def review(issues='[]', sentences=None, claim='정확성이 신뢰로 이어진다'):
-    sentences = sentences or '[{"id": "s1", "role": "claim"}]'
-    return llm_result('===REVIEW===\n{"inferred_claim": "%s", "sentences": %s, "issues": %s}\n===END===\n'
-                      % (claim, sentences, issues))
+def review(issues='[]', sentences=None, claim='정확성이 신뢰로 이어진다', paragraphs=None):
+    sentences = sentences or '[{"id": "s1", "role": "claim", "supports": "p1", "fact_ids": []}]'
+    paragraphs = paragraphs or '[{"id": "p1", "inferred_claim": "정확성이 신뢰로 이어진다"}]'
+    return llm_result(
+        '===REVIEW===\n'
+        '{"inferred_claim": "%s", "paragraphs": %s, "sentences": %s, "issues": %s}\n'
+        '===END===\n' % (claim, paragraphs, sentences, issues))
 
 
 class ScriptedLLM:
@@ -305,7 +310,7 @@ class QualityCheckTest(EngineFixture, unittest.TestCase):
         self.assertEqual(data['status'], C.STATUS_REVIEW_REQUIRED)
 
     def test_plan_citing_unknown_experience_is_flagged(self):
-        bad = '===PLAN===\np1 | 주장 | 요구 | 2099-없는경험.md | -\n===END==='
+        bad = '===PLAN===\np1 | 주장 | 요구 | 2099-없는경험.md | 이유 | - | -\n===END==='
         data = self.run_quality(ScriptedLLM(draft(plan=bad), review()))[-1][1]
         self.assertIn(C.ISSUE_PLAN_UNKNOWN_EXPERIENCE, data['issues'])
 
@@ -376,15 +381,14 @@ class SecondExperienceTest(EngineFixture, unittest.TestCase):
             '# 둘째 경험\n\n## 메타\n\n- 카테고리: 리더십\n- 키워드: 리더십\n\n내용', encoding='utf-8')
 
     def test_two_experiences_without_a_stated_role_is_flagged(self):
-        plan = ('===PLAN===\np1 | 주장 | 요구 | 2024-경험.md, 2023-둘째.md | -\n===END===')
+        plan = ('===PLAN===\np1 | 주장 | 요구 | 2024-경험.md, 2023-둘째.md | 둘 다 같은 판단의 근거다 | - | -\n===END===')
         llm = ScriptedLLM(draft(plan=plan), review())
         data = self.run_events(quality_check=True, complete=llm,
                                override_filenames=['2024-경험.md', '2023-둘째.md'])[-1][1]
         self.assertIn(C.ISSUE_SECOND_EXPERIENCE_UNJUSTIFIED, data['issues'])
 
     def test_two_experiences_with_a_role_passes(self):
-        plan = ('===PLAN===\np1 | 주장 | 요구 | 2024-경험.md, 2023-둘째.md | '
-                '대조 — 혼자 할 때와 팀일 때의 차이를 보여준다\n===END===')
+        plan = ('===PLAN===\np1 | 주장 | 요구 | 2024-경험.md, 2023-둘째.md | 둘 다 같은 판단의 근거다 | - | 대조 — 혼자 할 때와 팀일 때의 차이\n===END===')
         llm = ScriptedLLM(draft(plan=plan), review())
         data = self.run_events(quality_check=True, complete=llm,
                                override_filenames=['2024-경험.md', '2023-둘째.md'])[-1][1]
@@ -629,3 +633,61 @@ class ReviseTest(EngineFixture, unittest.TestCase):
         prompt = llm.messages[0][0]['content']
         self.assertIn('2024-경험.md', prompt)
         self.assertIn('새 경험이나 새 사실을 넣지 마세요', prompt)
+
+
+class PlanSchemaTest(unittest.TestCase):
+    """S11-14 / 설계검토 B-1: 근거와 주장을 잇는 설명(warrant)이 없으면 논증이 아니라 나열이다."""
+
+    def row(self, warrant='오류를 줄인 경험이 그 판단의 근거다', jd='-', second='-'):
+        return (f'===PLAN===\np1 | 주장 | 요구 | 2024-경험.md | {warrant} | {jd} | {second}\n'
+                '===END===')
+
+    def test_parses_warrant_and_job_requirement(self):
+        rows = C.parse_plan(self.row(jd='SOP 준수 경험'))
+        self.assertEqual(rows[0]['warrant'], '오류를 줄인 경험이 그 판단의 근거다')
+        self.assertEqual(rows[0]['job_requirement'], 'SOP 준수 경험')
+
+    def test_dash_means_empty(self):
+        self.assertEqual(C.parse_plan(self.row(jd='-'))[0]['job_requirement'], '')
+
+    def test_missing_warrant_is_flagged(self):
+        rows = C.parse_plan(self.row(warrant='-'))
+        self.assertIn(C.ISSUE_PLAN_MISSING_WARRANT, C.lint_plan(rows, ['2024-경험.md']))
+
+    def test_present_warrant_passes(self):
+        rows = C.parse_plan(self.row())
+        self.assertNotIn(C.ISSUE_PLAN_MISSING_WARRANT, C.lint_plan(rows, ['2024-경험.md']))
+
+
+class ReviewSchemaTest(unittest.TestCase):
+    """S11-14 / 설계검토 B-3: 문단 구분과 근거 출처까지 검증한다."""
+
+    def parse(self, body, ids=('s1',), facts=('2024-경험.md',)):
+        return C.parse_review('===REVIEW===\n' + body + '\n===END===', ids, allowed_fact_ids=facts)
+
+    def test_valid_review(self):
+        data, err = self.parse('{"paragraphs": [{"id": "p1"}], '
+                                '"sentences": [{"id": "s1", "role": "claim", "supports": "p1", '
+                                '"fact_ids": ["2024-경험.md"]}], "issues": []}')
+        self.assertIsNone(err)
+        self.assertEqual(data['sentences'][0]['supports'], 'p1')
+
+    def test_sentence_pointing_at_unknown_paragraph_fails(self):
+        _, err = self.parse('{"paragraphs": [{"id": "p1"}], '
+                             '"sentences": [{"id": "s1", "role": "claim", "supports": "p9"}], '
+                             '"issues": []}')
+        self.assertIn('없는 문단', err)
+
+    def test_fact_id_outside_supplied_experiences_fails(self):
+        """모델이 주지 않은 경험을 근거로 댔다면 그 평가 자체를 믿을 수 없다."""
+        _, err = self.parse('{"paragraphs": [{"id": "p1"}], '
+                             '"sentences": [{"id": "s1", "role": "evidence", "supports": "p1", '
+                             '"fact_ids": ["2099-없는경험.md"]}], "issues": []}')
+        self.assertIn('제공하지 않은 근거', err)
+
+    def test_null_supports_is_allowed(self):
+        """어느 주장에도 기여하지 않는 문장이 있다는 것 자체가 유효한 판정이다."""
+        _, err = self.parse('{"paragraphs": [{"id": "p1"}], '
+                             '"sentences": [{"id": "s1", "role": "unrelated", "supports": null}], '
+                             '"issues": []}')
+        self.assertIsNone(err)
