@@ -28,7 +28,8 @@ from lib.coverletter import (ISSUE_CITED_UNKNOWN, ISSUE_DROPPED_OVERRIDES,  # no
                              STATUS_REVIEW_REQUIRED, TARGET_UNDERSHOOT, LengthSpec, build_prompt,
                              build_retry_prompt, count_chars, gather_context,
                              generate_coverletter_events, parse_answer, read_if_exists,
-                             strip_placeholder_rules, validate_cited_experiences)
+                             revise_coverletter_events, strip_placeholder_rules,
+                             validate_cited_experiences)
 from lib.llm import stream_complete
 from lib.resume import _safe_folder_name
 from web.data import get_open_jobs
@@ -282,5 +283,60 @@ def generate_bundle(name):
             'coverletter_status': coverletter_status, 'coverletter_issues': coverletter_issues,
             'folder': folder_name,
         })
+
+    return Response(stream_with_context(stream()), mimetype='text/event-stream')
+
+
+def _safe_rel_path(raw):
+    """outputs/<user>/ 아래의 상대 경로. 사용자 입력이므로 조각마다 검사한다.
+    web.paths.safe_path 와 같은 역할이지만, 여기서는 abort 대신 None 을 돌려
+    SSE 에러로 알린다(스트림이 이미 시작된 뒤 abort 하면 늦는다 — S1-3 의 교훈)."""
+    parts = [p for p in (raw or '').replace('\\', '/').split('/') if p]
+    if not parts or not all(valid_segment(p) for p in parts):
+        return None
+    return '/'.join(parts)
+
+
+@bp.route('/generate/<name>/revise', methods=['POST'])
+def revise(name):
+    """S11-13 / 설계검토 C-3: 이미 저장된 자소서의 한 문항을 고치고 **전체 문서**를 돌려준다.
+
+    "수정하면 바뀐 부분만 보여준다" 는 불만은 프롬프트로 당부할 문제가 아니라 출력 계약
+    문제였다. 모델이 그 문항만 돌려줘도 서버가 전체를 재구성하므로, 고치지 않은 문항은
+    항상 보존된다.
+    """
+    root = user_dir(name)
+    data = request.get_json(silent=True) or request.form
+    (errors, _, _, question, length, _,
+     use_trends, _, _) = _validate_generate_params({**data, 'company': 'x', 'position': 'x'})
+    errors = [e for e in errors if '기업명' not in e and '직무명' not in e]
+
+    rel_path = _safe_rel_path(data.get('rel_path'))
+    if not rel_path:
+        errors.append('수정할 문서 경로가 올바르지 않습니다.')
+    instruction = (data.get('instruction') or '').strip()
+    if not instruction:
+        errors.append('어떻게 고칠지 알려주세요.')
+
+    if errors:
+        def bad():
+            yield sse('error', {'message': ' '.join(errors)})
+        return Response(bad(), mimetype='text/event-stream')
+
+    # 수정 시에는 기업 자료를 게이트하지 않는다 — 이미 통과해서 만들어진 문서이고,
+    # 여기서 막으면 사용자가 글을 고칠 방법이 없어진다. 사실 검사는 그대로 건다.
+    ctx = gather_context(root,
+                         companies_dir=project_root() / 'companies',
+                         references_dir=project_root() / 'references' / 'coverletter',
+                         company='', position='',
+                         trends_base=trends_dir(), use_trends=use_trends)
+    db_path = _db_path()
+
+    def stream():
+        for event, ev_data in revise_coverletter_events(
+                name, question, root / 'experiences',
+                rel_path=rel_path, instruction=instruction, length=length, context=ctx,
+                output_dir=output_dir(name), db_path=db_path, complete=stream_complete):
+            yield sse(event, ev_data)
 
     return Response(stream_with_context(stream()), mimetype='text/event-stream')

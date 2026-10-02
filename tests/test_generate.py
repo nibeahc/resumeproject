@@ -654,6 +654,70 @@ class GenerateRouteTest(unittest.TestCase):
         m.assert_not_called()
 
 
+class ReviseRouteTest(unittest.TestCase):
+    """S11-13 / 설계검토 C-3: 수정 결과는 발췌가 아니라 전체 문서다."""
+
+    DOC = ('# 테스트기업 테스트직무\n\n'
+           '## 지원 동기\n글자수: 97자 (공백 포함, 목표 100자)\n\n'
+           '첫 번째 답변입니다.\n\n---\n참조한 경험: 테스트 경험 (2024-테스트경험.md)\n'
+           '작성일: 2026.10.01\n\n'
+           '## 성장 경험\n글자수: 50자 (공백 포함, 목표 100자)\n\n'
+           '두 번째 답변입니다.\n\n---\n참조한 경험: 테스트 경험 (2024-테스트경험.md)\n'
+           '작성일: 2026.10.01\n')
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.root = self.tmp / 'root'
+        u = self.root / 'users' / '홍길동'
+        (u / 'experiences').mkdir(parents=True)
+        (u / 'experiences' / '2024-테스트경험.md').write_text(
+            '# 테스트 경험\n\n## 메타\n\n- 카테고리: 리더십\n\n내용입니다', encoding='utf-8')
+        self.doc_dir = self.root / 'outputs' / '홍길동' / '테스트기업_테스트직무'
+        self.doc_dir.mkdir(parents=True)
+        (self.doc_dir / '자소서.md').write_text(self.DOC, encoding='utf-8')
+        app = create_app({'PROJECT_ROOT': self.root, 'DB_PATH': self.tmp / 'app.db',
+                           'TESTING': True})
+        self.c = app.test_client()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def post(self, **kw):
+        payload = {'rel_path': '테스트기업_테스트직무/자소서.md', 'question': '지원 동기',
+                   'instruction': '더 구체적으로', 'char_limit': 100}
+        payload.update(kw)
+        return self.c.post('/generate/홍길동/revise', json=payload)
+
+    def test_returns_full_document_and_preserves_other_sections(self):
+        answer = '고친 답변입니다. ' + '가' * 88
+        fake = llm_result(f'===ANSWER===\n{answer}\n===END===\n===META===\nx\n===END===\n')
+        with patch.object(generate_route, 'stream_complete', return_value=fake):
+            body = self.post().get_data(as_text=True)
+        self.assertIn('"full_document"', body)
+        on_disk = (self.doc_dir / '자소서.md').read_text(encoding='utf-8')
+        self.assertIn('고친 답변입니다', on_disk)
+        self.assertIn('두 번째 답변입니다.', on_disk)     # 건드리지 않은 문항 보존
+        self.assertNotIn('첫 번째 답변입니다.', on_disk)
+
+    def test_missing_instruction_rejected(self):
+        with patch.object(generate_route, 'stream_complete') as m:
+            body = self.post(instruction='  ').get_data(as_text=True)
+        m.assert_not_called()
+        self.assertIn('어떻게 고칠지', body)
+
+    def test_path_traversal_rejected(self):
+        with patch.object(generate_route, 'stream_complete') as m:
+            body = self.post(rel_path='../../../etc/passwd').get_data(as_text=True)
+        m.assert_not_called()
+        self.assertIn('경로가 올바르지 않습니다', body)
+
+    def test_unknown_question_errors(self):
+        with patch.object(generate_route, 'stream_complete') as m:
+            body = self.post(question='없는 문항').get_data(as_text=True)
+        m.assert_not_called()
+        self.assertIn('문항을 문서에서 찾지 못했습니다', body)
+
+
 class GenerateBundleTest(unittest.TestCase):
     """S7-3: 공고 하나를 고르면 이력서·자소서·포트폴리오를 한 번에 생성한다."""
 

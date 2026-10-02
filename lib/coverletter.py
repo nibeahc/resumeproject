@@ -67,6 +67,7 @@ ISSUE_UNKNOWN_ORG = 'unverified_organization'
 ISSUE_FORBIDDEN_CHAR = 'forbidden_character'
 ISSUE_DUPLICATE_OVERRIDE = 'duplicate_override'
 ISSUE_UNEXPLAINED_NAME = 'unexplained_name'   # S11-12
+ISSUE_SECTION_NOT_FOUND = 'section_not_found'  # S11-13
 
 COMPANY_EVIDENCE_MAX_AGE_DAYS = 90   # skills/write-coverletter.md Step 2 의 "90일" 을 코드로 옮긴다
 
@@ -479,6 +480,117 @@ def check_personal_rules(answer: str, rules_text: str) -> List[str]:
         if rule['detect'](rules_text or '') and rule['violation'](answer):
             found.append(rule['label'])
     return found
+
+
+# ---------------------------------------------------------------------------
+# 문서 구조 (S11-13, 설계검토 C-3)
+#
+# 저장된 자소서는 문항별 append 구조다.
+#
+#   # <기업> <직무>
+#
+#   ## <문항>
+#   글자수: ...
+#
+#   <본문>
+#
+#   ---
+#   <META>
+#   작성일: ...
+#
+# 수정은 "그 문항 구간만" 바꾸고 **문서 전체를 돌려준다.** 모델이 발췌만 내놓아도
+# 서버가 전체를 재구성하므로, "수정한 부분만 보여주지 말라" 는 선호를 모델이 매번
+# 기억할 필요가 없다 (설계검토 C-3).
+# ---------------------------------------------------------------------------
+
+_SECTION_SPLIT = re.compile(r'^## ', re.M)
+_CITED_IN_SECTION = re.compile(r'^참조한 경험:\s*(.+)$', re.M)
+
+
+def split_document(text: str) -> Tuple[str, List[Tuple[str, str]]]:
+    """(머리말, [(문항, 구간 전문), ...]). 구간 전문은 "## " 를 포함하지 않는다."""
+    if not text:
+        return '', []
+    parts = _SECTION_SPLIT.split(text)
+    head = parts[0].rstrip()
+    sections = []
+    for body in parts[1:]:
+        lines = body.split('\n')
+        sections.append((lines[0].strip(), body.rstrip()))
+    return head, sections
+
+
+def find_section(text: str, question: str) -> Optional[str]:
+    for q, body in split_document(text)[1]:
+        if q == question.strip():
+            return body
+    return None
+
+
+def section_answer(section: str) -> str:
+    """구간에서 본문만 뽑는다. 글자수 줄과 ⚠️ 배너 뒤부터 --- 앞까지다."""
+    body = section.split('\n', 1)[1] if '\n' in section else ''
+    body = body.split('\n---\n', 1)[0]
+    lines = [ln for ln in body.split('\n')
+             if not ln.startswith('글자수:') and not ln.startswith('⚠️')]
+    return '\n'.join(lines).strip()
+
+
+def section_cited_files(section: str) -> List[str]:
+    """그 구간이 어떤 경험으로 쓰였는지. 수정할 때 허용 범위를 그대로 유지하기 위해 쓴다."""
+    out = []
+    for line in _CITED_IN_SECTION.findall(section):
+        for fn in _MD_FILENAME.findall(line):
+            if fn not in out:
+                out.append(fn)
+    return out
+
+
+def replace_section(text: str, question: str, new_section: str) -> Optional[str]:
+    """해당 문항 구간만 바꾼 **문서 전체**를 돌려준다. 못 찾으면 None."""
+    head, sections = split_document(text)
+    target = question.strip()
+    if not any(q == target for q, _ in sections):
+        return None
+    rebuilt = [head] if head else []
+    for q, body in sections:
+        rebuilt.append('## ' + (new_section.rstrip() if q == target else body))
+    return '\n\n'.join(rebuilt).rstrip() + '\n'
+
+
+def build_revise_prompt(question: str, current_answer: str, instruction: str,
+                         length: 'LengthSpec', allowed_filenames) -> str:
+    """사용자가 말한 수정 지시를 그대로 전달하되, 허용 범위를 코드가 못박는다."""
+    limit = (f'{length.hard_max_chars}자 ({length.count_desc}) 이내'
+             if length.bounded else f'제한 없음 (세는 기준은 {length.count_desc})')
+    return f"""아래 자소서 문항의 답변을 사용자의 지시대로 고쳐 주세요.
+
+[문항]
+{question}
+
+[현재 답변]
+{current_answer}
+
+[사용자의 수정 지시]
+{instruction}
+
+[지킬 것]
+- 쓸 수 있는 경험은 그대로입니다: {', '.join(allowed_filenames) or '(원문에 기록 없음)'}.
+  새 경험이나 새 사실을 넣지 마세요. 수치와 기관명도 기존 경험에 있는 것만 씁니다.
+- 지시와 무관한 부분은 바꾸지 마세요.
+- 글자수: {limit}
+- bullet point 금지, 문단 형식.
+
+[출력 형식 — 반드시 이 형식만]
+===ANSWER===
+(고친 답변 전문. 발췌가 아니라 그 문항의 답변 전체)
+===END===
+
+===META===
+참조한 경험: [경험명] ([파일명])
+수정 요약: [무엇을 왜 바꿨는지 한 줄]
+===END===
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -1206,4 +1318,151 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
         'review': review,
         'review_error': review_error,
         'repairs': repairs,
+    }
+
+
+def revise_coverletter_events(user, question: str, exp_dir: Path, *,
+                               rel_path: str,
+                               instruction: str,
+                               length: LengthSpec,
+                               context: 'CoverletterContext',
+                               output_dir: Path,
+                               db_path=None,
+                               complete=None):
+    """이미 저장된 자소서의 한 문항을 고치고 **문서 전체**를 돌려준다 (S11-13, 설계검토 C-3).
+
+    불만 5번("수정하면 바뀐 부분만 보여준다")은 프롬프트로 당부할 문제가 아니라 출력
+    계약 문제다. 모델은 그 문항의 답변만 돌려줘도 되고, 전체 문서는 서버가 재구성한다.
+    고치지 않은 문항은 그대로 보존된다.
+
+    허용 경험은 **원문에 기록된 것을 그대로 쓴다.** 수정하면서 새 경험이 끼어드는 것을
+    막기 위해서다 — 재선택이 필요하면 수정이 아니라 새로 생성해야 한다.
+
+    결정적 검사(글자수, 인용, 수치·기관명, 개인 규칙, 고유명사)는 생성과 동일하게 건다.
+    별도 검토 호출(critic)은 걸지 않는다 — 사용자가 직접 지시한 수정이고, 호출을 한 번 더
+    늘릴 만큼의 근거가 아직 없다. 필요해지면 generate 쪽 구조를 그대로 가져오면 된다.
+    """
+    complete = complete or stream_complete
+    ctx = context
+    issues = []
+
+    out_dir = output_dir.resolve()
+    doc_path = (out_dir / rel_path).resolve()
+    if not doc_path.is_relative_to(out_dir) or not doc_path.exists():
+        yield 'error', {'message': f'수정할 문서를 찾을 수 없습니다: {rel_path}'}
+        return
+
+    document = doc_path.read_text(encoding='utf-8')
+    section = find_section(document, question)
+    if section is None:
+        available = [q for q, _ in split_document(document)[1]]
+        yield 'error', {'message': f'그 문항을 문서에서 찾지 못했습니다: {question}',
+                        'issues': [ISSUE_SECTION_NOT_FOUND], 'available_questions': available}
+        return
+
+    current_answer = section_answer(section)
+    allowed = section_cited_files(section)
+    # 원문에 기록이 없으면(옛 파일) 경험 디렉터리 전체를 허용 범위로 두지 않는다 —
+    # 그러면 수정이 사실상 재생성이 된다. 파일명 기록이 없을 때만 제한을 비워 둔다.
+    allowed_texts = [(fn, (exp_dir / fn).read_text(encoding='utf-8'))
+                     for fn in allowed if (exp_dir / fn).exists()]
+
+    yield 'progress', {'stage': 'revise_start', 'question': question,
+                       'allowed_experiences': [fn for fn, _ in allowed_texts]}
+
+    system = load_skill('write-coverletter')
+    messages = [{'role': 'user',
+                 'content': build_revise_prompt(question, current_answer, instruction,
+                                                 length, allowed)}]
+
+    def call_llm(msgs, system=system):
+        q = queue.Queue()
+
+        def worker():
+            try:
+                q.put(('done', complete(system=system, messages=msgs, max_tokens=3000,
+                                         on_delta=lambda c: q.put(('delta', c)))))
+            except Exception as e:  # noqa: BLE001
+                q.put(('error', str(e)))
+
+        threading.Thread(target=worker, daemon=True).start()
+        seen = 0
+        while True:
+            kind, payload = q.get()
+            if kind == 'delta':
+                seen += len(payload)
+                if seen >= 200:
+                    yield 'progress', {'stage': 'generating'}
+                    seen = 0
+                continue
+            if kind == 'error':
+                raise RuntimeError(payload)
+            return payload
+
+    try:
+        result = yield from call_llm(messages)
+    except RuntimeError as e:
+        yield 'error', {'message': f'LLM 호출 실패: {e}'}
+        return
+
+    answer, meta = parse_answer(result['text'])
+    if not answer:
+        yield 'error', {'message': 'LLM 출력에서 ANSWER 블록을 찾지 못했습니다.',
+                        'raw': result['text'][:500]}
+        return
+
+    # 수정본에도 생성과 **같은 결정적 검사**를 건다. 지시를 따르느라 글자수나 사실이
+    # 틀어지는 것을 막는다.
+    actual = count_chars(answer, length.count_mode)
+    exceeded = length.bounded and actual > length.hard_max_chars
+    if exceeded:
+        issues.append(ISSUE_OVER_LIMIT)
+    supplied = [fn for fn, _ in allowed_texts]
+    _, unknown_cited = validate_cited_experiences(meta, supplied) if supplied else ([], [])
+    if unknown_cited:
+        issues.append(ISSUE_CITED_UNKNOWN)
+    nums, orgs = find_unverified_facts(
+        answer, [txt for _, txt in allowed_texts] + [ctx.company_text, ctx.job_text, question])
+    if nums:
+        issues.append(ISSUE_UNKNOWN_NUMBER)
+    if orgs:
+        issues.append(ISSUE_UNKNOWN_ORG)
+    broken = check_personal_rules(answer, ctx.rules_text)
+    if broken:
+        issues.append(ISSUE_FORBIDDEN_CHAR)
+    unexplained = check_obscure_names(answer, ctx.glossary)
+    if unexplained:
+        issues.append(ISSUE_UNEXPLAINED_NAME)
+
+    # 구간을 다시 조립한다. 머리말의 글자수 줄과 작성일을 갱신하고 나머지는 보존한다.
+    today = date.today().strftime('%Y.%m.%d')
+    length_desc = f'목표 {length.hard_max_chars}자' if length.bounded else '길이 제한 없음'
+    exceeded_note = (f'\n⚠️ 글자수 초과: {actual}자 (제한 {length.hard_max_chars}자)\n'
+                     if exceeded else '')
+    new_section = (f'{question}\n글자수: {actual}자 ({length.count_desc}, {length_desc})'
+                   f'{exceeded_note}\n\n{answer}\n\n---\n{meta}\n수정일: {today}\n')
+
+    full_document = replace_section(document, question, new_section)
+    vr = versions.save_version(out_dir, rel_path, full_document, user=user, db_path=db_path)
+
+    yield 'done', {
+        'answer': answer,
+        'meta': meta,
+        'chars': actual,
+        'limit': length.hard_max_chars,
+        'length_mode': length.mode,
+        'count_mode': length.count_mode,
+        'exceeded': exceeded,
+        'status': STATUS_REVIEW_REQUIRED if issues else STATUS_READY,
+        'issues': issues,
+        'unverified_numbers': nums,
+        'unverified_organizations': orgs,
+        'broken_rules': broken,
+        'unexplained_names': unexplained,
+        'used_experiences': supplied,
+        # 설계검토 C-3: 외부 응답은 항상 전체 본문이다. 발췌만 돌려주지 않는다.
+        'full_document': full_document,
+        'rel_path': rel_path,
+        'saved_to': f'outputs/{user}/{rel_path}',
+        'version': vr.version if vr.ok else None,
     }

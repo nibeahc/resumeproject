@@ -36,6 +36,7 @@ EXPECTED_ROUTES = {
     ('/generate/<name>', 'POST'),
     ('/generate/<name>', 'GET'),
     ('/generate/<name>/bundle', 'POST'),
+    ('/generate/<name>/revise', 'POST'),
     ('/raw-fallback/<name>', 'POST'),
     ('/elicit/<name>', 'GET'),
     ('/elicit/<name>', 'POST'),

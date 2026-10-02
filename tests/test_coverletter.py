@@ -523,3 +523,109 @@ class GlossaryTest(unittest.TestCase):
     def test_empty_glossary_is_harmless(self):
         self.assertEqual(C.check_obscure_names('무슨 말이든', C.parse_glossary('')), [])
         self.assertFalse(C.parse_glossary(''))
+
+
+SAMPLE_DOC = """# 기업 직무
+
+## 지원 동기
+글자수: 97자 (공백 포함, 목표 100자)
+
+첫 번째 답변입니다.
+
+---
+참조한 경험: 테스트 경험 (2024-경험.md)
+작성일: 2026.10.01
+
+## 성장 경험
+글자수: 50자 (공백 포함, 목표 100자)
+
+두 번째 답변입니다.
+
+---
+참조한 경험: 테스트 경험 (2024-경험.md)
+작성일: 2026.10.01
+"""
+
+
+class DocumentStructureTest(unittest.TestCase):
+    """S11-13: 수정은 한 문항만 바꾸고 전체를 돌려준다."""
+
+    def test_splits_sections(self):
+        head, sections = C.split_document(SAMPLE_DOC)
+        self.assertEqual(head, '# 기업 직무')
+        self.assertEqual([q for q, _ in sections], ['지원 동기', '성장 경험'])
+
+    def test_section_answer_strips_header_and_meta(self):
+        section = C.find_section(SAMPLE_DOC, '지원 동기')
+        self.assertEqual(C.section_answer(section), '첫 번째 답변입니다.')
+
+    def test_section_cited_files(self):
+        section = C.find_section(SAMPLE_DOC, '지원 동기')
+        self.assertEqual(C.section_cited_files(section), ['2024-경험.md'])
+
+    def test_replace_section_preserves_the_others(self):
+        out = C.replace_section(SAMPLE_DOC, '지원 동기', '지원 동기\n글자수: 10자\n\n고친 답변\n')
+        self.assertIn('고친 답변', out)
+        self.assertNotIn('첫 번째 답변', out)
+        self.assertIn('두 번째 답변입니다.', out)   # 건드리지 않은 문항은 보존
+        self.assertTrue(out.startswith('# 기업 직무'))
+
+    def test_replace_unknown_section_returns_none(self):
+        self.assertIsNone(C.replace_section(SAMPLE_DOC, '없는 문항', 'x'))
+
+
+class ReviseTest(EngineFixture, unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        self.doc_dir = self.out / '기업_직무'
+        self.doc_dir.mkdir(parents=True)
+        (self.doc_dir / '자소서.md').write_text(SAMPLE_DOC, encoding='utf-8')
+
+    def revise(self, llm, **kw):
+        question = kw.pop('question', '지원 동기')
+        params = dict(rel_path='기업_직무/자소서.md', instruction='더 구체적으로',
+                      length=bounded(100), context=self.ctx(), output_dir=self.out,
+                      db_path=self.db_path, complete=llm)
+        params.update(kw)
+        return list(C.revise_coverletter_events('홍길동', question, self.exp_dir, **params))
+
+    def test_returns_full_document_not_just_the_edit(self):
+        """설계검토 C-3 의 핵심. 발췌가 아니라 전체를 돌려준다."""
+        events = self.revise(ScriptedLLM(draft(answer='고친 답변입니다. ' + '가' * 88, plan=None)))
+        kind, data = events[-1]
+        self.assertEqual(kind, 'done')
+        self.assertIn('고친 답변입니다', data['full_document'])
+        self.assertIn('두 번째 답변입니다.', data['full_document'])   # 다른 문항 보존
+        self.assertTrue(data['full_document'].startswith('# 기업 직무'))
+
+    def test_saves_a_new_version(self):
+        self.revise(ScriptedLLM(draft(answer='고친 답변입니다. ' + '가' * 88, plan=None)))
+        self.assertTrue((self.doc_dir / '자소서' / 'v1.md').exists())
+        on_disk = (self.doc_dir / '자소서.md').read_text(encoding='utf-8')
+        self.assertIn('고친 답변입니다', on_disk)
+        self.assertIn('두 번째 답변입니다.', on_disk)
+
+    def test_unknown_question_errors_with_available_list(self):
+        events = self.revise(ScriptedLLM(draft()), question='없는 문항')
+        kind, data = events[-1]
+        self.assertEqual(kind, 'error')
+        self.assertIn('성장 경험', data['available_questions'])
+
+    def test_path_outside_output_dir_is_refused(self):
+        events = self.revise(ScriptedLLM(draft()), rel_path='../../etc/passwd')
+        self.assertEqual(events[-1][0], 'error')
+
+    def test_deterministic_checks_still_apply(self):
+        """지시를 따르느라 글자수가 틀어지면 알린다."""
+        events = self.revise(ScriptedLLM(draft(answer='가' * 400, plan=None)))
+        data = events[-1][1]
+        self.assertTrue(data['exceeded'])
+        self.assertEqual(data['status'], C.STATUS_REVIEW_REQUIRED)
+
+    def test_allowed_experiences_come_from_the_document(self):
+        """수정하면서 새 경험이 끼어들면 안 된다 — 원문에 기록된 것만 허용한다."""
+        llm = ScriptedLLM(draft(answer='가' * 97, plan=None))
+        self.revise(llm)
+        prompt = llm.messages[0][0]['content']
+        self.assertIn('2024-경험.md', prompt)
+        self.assertIn('새 경험이나 새 사실을 넣지 마세요', prompt)

@@ -212,6 +212,31 @@
     <div class="answer-text" id="answerText"></div>
     <div class="meta-text" id="metaText"></div>
   </div>
+
+  <!-- S11-13 / 설계검토 C-3: 수정 결과는 발췌가 아니라 항상 전체 문서다.
+       모델이 그 문항만 돌려줘도 서버가 전체를 재구성하므로, 고치지 않은 문항은 보존된다. -->
+  <div class="card">
+    <h2 style="margin:0 0 4px; font-size:15px;">이 문항 고치기</h2>
+    <p style="font-size:12px; color:#6e6e73; margin:0 0 10px;">
+      어떻게 고칠지 적으면 그 문항만 다시 쓰고 <strong>문서 전체</strong>를 돌려줍니다.
+      쓸 수 있는 경험은 지금 문서에 기록된 것으로 고정됩니다 — 다른 경험으로 바꾸려면
+      위에서 재생성하세요.
+    </p>
+    <textarea class="form-input" id="reviseInstruction" rows="2"
+              placeholder="예: 두 번째 문장이 추상적이니 그때 실제로 한 판단을 넣어주세요"></textarea>
+    <div style="display:flex; justify-content:flex-end; margin-top:10px;">
+      <button class="btn btn-primary btn-sm" id="reviseBtn" onclick="reviseAnswer()">이 문항 고치기 →</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;">
+      <h2 style="margin:0; font-size:15px;">문서 전체</h2>
+      <span id="versionBadge" style="font-size:11px; color:#6e6e73;"></span>
+    </div>
+    <pre id="fullDocument" style="white-space:pre-wrap; word-break:break-word; font-size:13px;
+         line-height:1.8; margin:0; max-height:420px; overflow:auto;"></pre>
+  </div>
   <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
     <a href="#" id="savedLink" class="btn btn-secondary">저장된 파일 열기 / 편집 →</a>
     <button class="btn btn-secondary" onclick="resetForm()">다른 문항 작성</button>
@@ -274,6 +299,7 @@ const STAGE_LABEL = {
   unverified_facts: '⚠️ 출처에서 확인되지 않은 수치·기관명',
   rule_violation: '⚠️ 작성 규칙 위반',
   unexplained_names: '⚠️ 설명 없이 쓰인 내부 고유명사',
+  revise_start: '수정 준비 (쓸 수 있는 경험 고정)',
   plan: '논지 계획 확인',
   reviewing: '논지 검토 중...',
   reviewed: '검토 완료',
@@ -286,6 +312,7 @@ const STAGE_LABEL = {
   unresearched_company: '⚠️ 기업 정보 없이 진행 (동의함)',
 };
 
+let lastRelPath = '';       // S11-13: 수정 요청이 어떤 문서를 가리키는지
 let lastSelection = null;   // 마지막 'selected' 진행 이벤트 (question_type, selected, candidates)
 let lastQuestion = '';      // 재생성 시 결과 카드 제목에 다시 쓴다
 
@@ -535,6 +562,7 @@ const ISSUE_LABELS = {
   unverified_organization: '경험·공고 어디에도 없는 기관명이 있음',
   forbidden_character: '작성 규칙에서 금지한 문자가 들어감',
   duplicate_override: '같은 경험을 중복 지정해 하나로 합쳐짐',
+  section_not_found: '문서에서 그 문항을 찾지 못함',
   unexplained_name: '외부 독자가 모르는 이름이 설명 없이 쓰임',
 };
 
@@ -600,7 +628,62 @@ function showResult(question, data) {
   // rel_path 는 /output/<user>/<path:filename> 에 그대로 붙일 수 있는 형태다.
   document.getElementById('savedLink').href = outputUrl(data.rel_path || data.saved_to);
 
+  // S11-13: 전체 문서를 항상 보여준다.
+  lastRelPath = data.rel_path || '';
+  document.getElementById('fullDocument').textContent = data.full_document || data.answer || '';
+  document.getElementById('versionBadge').textContent = data.version ? `v${data.version}` : '';
+
   document.getElementById('resultBox').style.display = '';
+}
+
+// S11-13: 한 문항만 고치고 전체 문서를 받는다.
+async function reviseAnswer() {
+  const instruction = document.getElementById('reviseInstruction').value.trim();
+  if (!instruction) { toast('어떻게 고칠지 적어주세요.'); return; }
+  if (!lastRelPath) { toast('먼저 자소서를 생성해주세요.'); return; }
+
+  const btn = document.getElementById('reviseBtn');
+  btn.disabled = true;
+  document.getElementById('progressBox').style.display = '';
+  document.getElementById('progressLog').innerHTML = '';
+  document.getElementById('spinner').style.display = '';
+  document.getElementById('progressTitle').textContent = '수정 중...';
+
+  try {
+    const res = await fetch('/generate/{{ user }}/revise', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        rel_path: lastRelPath,
+        question: lastQuestion,
+        instruction,
+        char_limit: document.getElementById('charLimit').value,
+        length_mode: lengthMode(),
+        count_mode: document.querySelector('input[name="countMode"]:checked').value,
+        use_trends: document.getElementById('useTrends').checked,
+      }),
+    });
+
+    let doneData = null, errorMsg = null;
+    await consumeSSE(res, (ev, data) => {
+      if (ev === 'progress') logLine(STAGE_LABEL[data.stage] || data.stage);
+      else if (ev === 'done') doneData = data;
+      else if (ev === 'error') errorMsg = data.message;
+    });
+
+    btn.disabled = false;
+    document.getElementById('progressBox').style.display = 'none';
+    if (errorMsg) { toast(errorMsg, 4000); return; }
+    if (!doneData) { toast('수정 결과를 받지 못했습니다.', 4000); return; }
+
+    showResult(lastQuestion, doneData);
+    document.getElementById('reviseInstruction').value = '';
+    toast('수정 완료 — 전체 문서를 다시 받았습니다');
+  } catch (e) {
+    btn.disabled = false;
+    document.getElementById('progressBox').style.display = 'none';
+    toast('수정 중 오류가 발생했습니다: ' + e.message, 4000);
+  }
 }
 
 // S3-2: 후보 경험 체크박스 + 선택 근거. usedFilenames 는 이번에 실제로 쓰인 경험(코드가 확정한 값,
