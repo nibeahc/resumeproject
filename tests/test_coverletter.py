@@ -469,3 +469,57 @@ class PersonalRuleLintTest(unittest.TestCase):
     def test_not_checked_when_user_has_no_such_rule(self):
         """모든 사용자에게 강제할 규칙이 아니다. 규칙이 없으면 검사도 하지 않는다."""
         self.assertEqual(C.check_personal_rules('데이터·분석', '- 다른 규칙만 있다'), [])
+
+
+class GlossaryTest(unittest.TestCase):
+    """S11-12 / 설계검토 C-2, D-3: 기준이 "영어인가" 가 아니라 "독자가 아는가" 여야 한다."""
+
+    DOC = """# 사전
+
+## 풀어 써야 하는 이름
+
+| 원래 이름 | 자소서 표현 | 비고 |
+|---|---|---|
+| DIVE | 교내 데이터 분석 소모임 | 첫 등장에 한 번만 |
+| 다온 | 교내 봉사 동아리 |  |
+
+## 그대로 써도 되는 이름
+
+- 현대글로비스
+- 인천대학교
+
+## 분야에서 통용되는 전문용어
+
+- SCM, ERP
+"""
+
+    def test_parses_both_sections(self):
+        g = C.parse_glossary(self.DOC)
+        self.assertEqual(g.explain['DIVE'], '교내 데이터 분석 소모임')
+        self.assertIn('현대글로비스', g.allowed)
+        self.assertIn('SCM', g.allowed)
+
+    def test_korean_internal_name_is_caught_too(self):
+        """예전 규칙은 "영어 워딩" 기준이라 한국어 소모임명을 놓쳤다."""
+        g = C.parse_glossary(self.DOC)
+        self.assertEqual(C.check_obscure_names('다온에서 활동했습니다', g), ['다온'])
+
+    def test_name_with_explanation_passes(self):
+        g = C.parse_glossary(self.DOC)
+        self.assertEqual(C.check_obscure_names('교내 데이터 분석 소모임 DIVE 에서', g), [])
+
+    def test_explanation_only_passes(self):
+        g = C.parse_glossary(self.DOC)
+        self.assertEqual(C.check_obscure_names('교내 데이터 분석 소모임에서 활동', g), [])
+
+    def test_bare_name_is_flagged(self):
+        g = C.parse_glossary(self.DOC)
+        self.assertEqual(C.check_obscure_names('DIVE 에서 활동했습니다', g), ['DIVE'])
+
+    def test_allowed_names_are_never_flagged(self):
+        g = C.parse_glossary(self.DOC)
+        self.assertEqual(C.check_obscure_names('현대글로비스에서 인턴을 했습니다', g), [])
+
+    def test_empty_glossary_is_harmless(self):
+        self.assertEqual(C.check_obscure_names('무슨 말이든', C.parse_glossary('')), [])
+        self.assertFalse(C.parse_glossary(''))

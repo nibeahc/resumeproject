@@ -21,6 +21,7 @@ users/[이름]/
   writing-rules.md  ← 사용자가 직접 설정한 작성 규칙 (writing-style.md 보다 우선)
   index.md          ← 전체 경험 키워드/카테고리 색인
   관심직무.md        ← 관심 직무 목록, 직무별 핵심 키워드·추천 표현·피해야 할 표현
+  glossary.md       ← 외부 독자가 모르는 고유명사와 자소서용 설명형 표현
 
 companies/[기업명].md  ← 기업 정보 캐시 (자소서 작성 시 MCP로 자동 수집·저장)
 

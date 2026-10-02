@@ -273,6 +273,7 @@ const STAGE_LABEL = {
   duplicate_overrides: '⚠️ 같은 경험이 중복 지정됨',
   unverified_facts: '⚠️ 출처에서 확인되지 않은 수치·기관명',
   rule_violation: '⚠️ 작성 규칙 위반',
+  unexplained_names: '⚠️ 설명 없이 쓰인 내부 고유명사',
   plan: '논지 계획 확인',
   reviewing: '논지 검토 중...',
   reviewed: '검토 완료',
@@ -534,6 +535,7 @@ const ISSUE_LABELS = {
   unverified_organization: '경험·공고 어디에도 없는 기관명이 있음',
   forbidden_character: '작성 규칙에서 금지한 문자가 들어감',
   duplicate_override: '같은 경험을 중복 지정해 하나로 합쳐짐',
+  unexplained_name: '외부 독자가 모르는 이름이 설명 없이 쓰임',
 };
 
 function issueLabel(code, data) {
@@ -545,6 +547,9 @@ function issueLabel(code, data) {
   }
   if (code === 'forbidden_character' && data && (data.broken_rules || []).length) {
     return `작성 규칙 위반: ${data.broken_rules.join(', ')}`;
+  }
+  if (code === 'unexplained_name' && data && (data.unexplained_names || []).length) {
+    return `설명 없이 쓰인 이름: ${data.unexplained_names.join(', ')} (glossary.md 참고)`;
   }
   if (code === 'over_limit' && data) {
     return `글자수 제한 초과 (재시도 ${data.retries}회 후에도 ${data.chars - data.limit}자 초과)`;

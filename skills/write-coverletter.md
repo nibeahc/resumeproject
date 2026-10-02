@@ -30,6 +30,7 @@
 - `users/[이름]/writing-rules.md` 읽기 (충돌 시 writing-style.md 보다 우선 — `Claude.md` "규칙 우선순위")
 - `users/[이름]/index.md` 읽기
 - `users/[이름]/관심직무.md` 읽기
+- `users/[이름]/glossary.md` 읽기 — 외부 독자가 모르는 고유명사를 어떻게 쓸지. 기준은 "영어인가" 가 아니라 "지원서를 읽는 담당자가 이 이름을 알 수 있는가" 다 (한국어 소모임명도 해당한다)
 
 ### Step 2. 기업 정보 수집 (자동)
 

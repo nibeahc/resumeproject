@@ -66,6 +66,7 @@ ISSUE_UNKNOWN_NUMBER = 'unverified_number'
 ISSUE_UNKNOWN_ORG = 'unverified_organization'
 ISSUE_FORBIDDEN_CHAR = 'forbidden_character'
 ISSUE_DUPLICATE_OVERRIDE = 'duplicate_override'
+ISSUE_UNEXPLAINED_NAME = 'unexplained_name'   # S11-12
 
 COMPANY_EVIDENCE_MAX_AGE_DAYS = 90   # skills/write-coverletter.md Step 2 의 "90일" 을 코드로 옮긴다
 
@@ -182,6 +183,19 @@ def build_prompt(name, company, position, question, length: 'LengthSpec',
              f'- 지원동기는 기업 칭찬이 아니라 **직무 자체에 대한 관심과 본인 경험의 연결**로 쓰세요.'
     )
     rules_note = strip_placeholder_rules(rules_text) or '(비어 있음 — 적용할 규칙 없음, 무시)'
+    # S11-12: 외부 독자가 모를 이름을 어떻게 쓸지. 영어 여부가 아니라 독자 이해 기준이다.
+    glossary_note = ''
+    if ctx.glossary.explain:
+        rows = '\n'.join(f'- {term} → {gloss}' for term, gloss in ctx.glossary.explain.items())
+        glossary_note = (
+            '\n[고유명사 — 외부 독자(채용 담당자)가 모르는 이름입니다]\n'
+            '아래 이름은 그대로 쓰지 말고 설명형 표현으로 바꾸세요. 이름 자체가 꼭 필요하면\n'
+            '첫 등장에 한 번만 "설명형 표현 + 이름" 으로 쓰고, 그 뒤로는 설명형만 쓰세요.\n'
+            f'{rows}\n'
+        )
+        if ctx.glossary.allowed:
+            glossary_note += ('그대로 써도 되는 이름(바꾸지 마세요): '
+                               + ', '.join(ctx.glossary.allowed) + '\n')
     # S11-10 / 설계검토 B-1: 쓰기 전에 논지를 설계하게 한다. 검토 문서는 별도 선행 호출을
     # 제안하지만, 같은 응답의 **앞부분**에 받으면 호출을 늘리지 않고 대부분의 효과를 얻는다
     # (모델은 순차 생성하므로 PLAN 토큰이 실제로 ANSWER 보다 앞선다).
@@ -261,6 +275,7 @@ Step 2, Step 4 는 아래 안내를 따르세요. Step 9(출력 형식), Step 10
 --- users/{name}/관심직무.md ---
 {interest_text}
 
+{glossary_note}
 [Step 2: 기업 정보]
 {company_note}
 
@@ -466,6 +481,85 @@ def check_personal_rules(answer: str, rules_text: str) -> List[str]:
     return found
 
 
+# ---------------------------------------------------------------------------
+# 고유명사 처리 (S11-12, 설계검토 C-2 / D-3)
+#
+# 기존 규칙은 "경험 DB 의 영어 워딩을 한글로 풀어 쓸 것" 이었다. 기준이 언어라서
+# 한국어 소모임명("다온", "새싹기획단")이나 내부 프로그램 코드명은 그대로 통과했다.
+# 검토 문서의 지적대로 기준을 **독자 이해**로 바꾸고, 개인 사전을 따로 둔다.
+#
+#   users/[이름]/glossary.md  — 풀어 쓸 이름 / 그대로 쓸 이름 / 전문용어
+#
+# 코드는 "첫 등장에 설명이 붙었는가" 만 본다. 무엇을 풀어 쓸지는 사람이 정한다.
+# ---------------------------------------------------------------------------
+
+_GLOSSARY_ROW = re.compile(r'^\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|')
+_SECTION = re.compile(r'^##\s*(.+?)\s*$', re.M)
+
+
+@dataclass
+class Glossary:
+    """term → 자소서에서 쓸 설명형 표현."""
+    explain: dict = field(default_factory=dict)   # 풀어 써야 하는 이름
+    allowed: List[str] = field(default_factory=list)   # 그대로 써도 되는 이름(참고용)
+
+    def __bool__(self):
+        return bool(self.explain or self.allowed)
+
+
+def parse_glossary(text: str) -> Glossary:
+    g = Glossary()
+    if not text:
+        return g
+    section = ''
+    for line in text.split('\n'):
+        m = _SECTION.match(line)
+        if m:
+            section = m.group(1)
+            continue
+        if '풀어' in section:
+            row = _GLOSSARY_ROW.match(line)
+            if not row:
+                continue
+            term, gloss = row.group(1).strip(), row.group(2).strip()
+            if not term or term in ('원래 이름', '---') or set(term) <= {'-', ' '}:
+                continue
+            if gloss and gloss not in ('자소서 표현', '---'):
+                g.explain[term] = gloss
+        elif '그대로' in section or '전문용어' in section:
+            for item in re.findall(r'^-\s*(.+?)\s*$', line):
+                g.allowed.extend(x.strip() for x in item.split(',') if x.strip())
+    return g
+
+
+def load_glossary(user_root: Path) -> Glossary:
+    return parse_glossary(read_if_exists(user_root / 'glossary.md'))
+
+
+def _gloss_core(gloss: str) -> str:
+    """설명형 표현에서 대조에 쓸 핵심 부분. 괄호 주석과 조사를 떼어낸다."""
+    core = re.split(r'[(（]', gloss)[0].strip()
+    return core
+
+
+def check_obscure_names(answer: str, glossary: Glossary) -> List[str]:
+    """사전에 등록된 이름이 **설명 없이** 쓰였는지 본다.
+
+    판정은 단순하다 — 그 이름이 본문에 있으면 설명 표현도 본문에 있어야 한다.
+    "교내 데이터 분석 소모임 DIVE" 처럼 둘 다 쓰면 통과하고, "DIVE" 만 쓰면 걸린다.
+    설명으로 완전히 대체한 경우(이름이 아예 없음)도 당연히 통과다.
+    """
+    found = []
+    for term, gloss in glossary.explain.items():
+        if term not in answer:
+            continue
+        core = _gloss_core(gloss)
+        if core and core in answer:
+            continue
+        found.append(term)
+    return found
+
+
 def parse_answer(text):
     a = _ANSWER_BLOCK.search(text)
     m = _META_BLOCK.search(text)
@@ -623,6 +717,7 @@ class CoverletterContext:
     reference_texts: List[Tuple[str, str]] = field(default_factory=list)
     trends_text: str = ''
     job_text: str = ''
+    glossary: 'Glossary' = field(default_factory=lambda: Glossary())
 
 
 MAX_REFERENCES = 3  # 레퍼런스는 프롬프트 비용이 커서 상한을 둔다
@@ -689,6 +784,7 @@ def gather_context(user_root: Path, *, companies_dir: Path, references_dir: Path
         reference_texts=reference_texts,
         trends_text=trends_text,
         job_text=_job_to_text(job) if job else '',
+        glossary=load_glossary(user_root),
     )
 
 
@@ -925,11 +1021,18 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
         broken = check_personal_rules(answer_text, ctx.rules_text)
         if broken:
             found.append(ISSUE_FORBIDDEN_CHAR)
-        return found, n, over, plan_rows, cited_, unknown_, nums, orgs, broken
+
+        # S11-12: 설명 없이 쓰인 내부 고유명사
+        unexplained = check_obscure_names(answer_text, ctx.glossary)
+        if unexplained:
+            found.append(ISSUE_UNEXPLAINED_NAME)
+        return found, n, over, plan_rows, cited_, unknown_, nums, orgs, broken, unexplained
 
     (det, actual, exceeded, plan, cited_experiences, unknown_cited,
-     unverified_numbers, unverified_orgs, broken_rules) = deterministic_check(
-        result['text'], answer, meta)
+     unverified_numbers, unverified_orgs, broken_rules,
+     unexplained_names) = deterministic_check(result['text'], answer, meta)
+    if unexplained_names:
+        yield 'progress', {'stage': 'unexplained_names', 'names': unexplained_names}
     if unverified_numbers or unverified_orgs:
         yield 'progress', {'stage': 'unverified_facts',
                             'numbers': unverified_numbers, 'organizations': unverified_orgs}
@@ -980,7 +1083,7 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
                     new_answer, new_meta = parse_answer(repaired['text'])
                     if new_answer:
                         (new_det, n2, over2, plan2, cited2, unknown2,
-                         nums2, orgs2, broken2) = deterministic_check(
+                         nums2, orgs2, broken2, unexplained2) = deterministic_check(
                             repaired['text'], new_answer, new_meta)
                         # 검토 지적을 고치면서 글자수나 사실이 틀어졌다면 수정본을 버린다.
                         worse = set(new_det) - set(det)
@@ -992,7 +1095,7 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
                             det, actual, exceeded = new_det, n2, over2
                             plan, cited_experiences, unknown_cited = plan2, cited2, unknown2
                             unverified_numbers, unverified_orgs = nums2, orgs2
-                            broken_rules = broken2
+                            broken_rules, unexplained_names = broken2, unexplained2
                     else:
                         yield 'progress', {'stage': 'repair_failed', 'error': 'ANSWER 블록 없음'}
             # 수정 후에도(또는 수정 없이) 남은 차단성 지적은 사람에게 넘긴다.
@@ -1099,6 +1202,7 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
         'unverified_numbers': unverified_numbers,
         'unverified_organizations': unverified_orgs,
         'broken_rules': broken_rules,
+        'unexplained_names': unexplained_names,
         'review': review,
         'review_error': review_error,
         'repairs': repairs,

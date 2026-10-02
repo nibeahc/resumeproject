@@ -339,6 +339,19 @@ class GenerateRouteTest(unittest.TestCase):
         self.assertIn('"unverified_number"', body)
         self.assertIn('"37"', body)
 
+    def test_unexplained_internal_name_is_flagged(self):
+        """S11-12: glossary 에 등록된 이름이 설명 없이 쓰이면 알린다."""
+        (self.root / 'users' / '홍길동' / 'glossary.md').write_text(
+            '## 풀어 써야 하는 이름\n\n| 원래 이름 | 자소서 표현 |\n|---|---|\n'
+            '| DIVE | 교내 데이터 분석 소모임 |\n', encoding='utf-8')
+        answer = 'DIVE 에서 분석을 맡았습니다. ' + '가' * 82
+        fake = llm_result(f'===ANSWER===\n{answer}\n===END===\n===META===\nx\n===END===\n')
+        with patch.object(generate_route, 'stream_complete', return_value=fake) as m:
+            body = self.post(char_limit=len(answer)).get_data(as_text=True)
+        self.assertIn('"unexplained_name"', body)
+        # 사전은 프롬프트에도 들어가야 한다 (사후 적발만으로는 부족하다)
+        self.assertIn('교내 데이터 분석 소모임', m.call_args.kwargs['messages'][0]['content'])
+
     def test_middot_is_flagged_when_user_rule_forbids_it(self):
         """S11-11: writing-rules.md 에 있어도 코드가 검사하지 않던 규칙."""
         (self.root / 'users' / '홍길동' / 'writing-rules.md').write_text(
