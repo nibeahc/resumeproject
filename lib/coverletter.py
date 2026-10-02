@@ -73,7 +73,9 @@ ISSUE_PLAN_MISSING_WARRANT = 'plan_missing_warrant'  # S11-14
 COMPANY_EVIDENCE_MAX_AGE_DAYS = 90   # skills/write-coverletter.md Step 2 의 "90일" 을 코드로 옮긴다
 
 # 검토 결과 중 "사람이 반드시 봐야 하는" 유형. 나머지는 기록만 한다.
-BLOCKING_REVIEW_KINDS = frozenset({'unsupported_claim', 'new_unrelated_claim', 'fabricated_fact'})
+# skills/review-coverletter.md 의 issues[].kind 와 같은 문자열이어야 한다.
+BLOCKING_REVIEW_KINDS = frozenset({ISSUE_UNSUPPORTED_CLAIM, ISSUE_NEW_UNRELATED_CLAIM,
+                                    ISSUE_FABRICATED_FACT})
 MAX_REPAIRS = 1   # 설계검토 B-3: 수정은 최대 1회. 그 뒤엔 사람에게 넘긴다
 
 

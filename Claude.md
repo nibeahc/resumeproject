@@ -39,8 +39,13 @@ outputs/[이름]/     ← 사용자별 생성 결과물
 ## Skills (작업 절차)
 
 - parse-experiences            : users/[이름]/raw/ → users/[이름]/experiences/ 변환 및 태깅
+- elicit-experiences           : raw 파일 없이 대화로 경험 발굴 (콜드 스타트)
 - write-coverletter            : 자소서 문항 → 문단 작성 (기업 리서치 + 레퍼런스 자동 참조)
 - review-coverletter           : 작성된 초안의 문장별 역할·근거 검토 (S11-10, 별도 호출)
+- write-resume                 : 공고 필수조건 순서로 경험 재배치 (창작 아님)
+- write-portfolio              : 포트폴리오 목차 + 챕터 초안
+- parse-job                    : 붙여넣은 채용공고 → jobs/[출처]-[ID].md + jobs 테이블
+- match-jobs                   : 공고 조건과 경험 DB 대조 (근거 파일명 필수)
 - query-experiences            : 이력 조회
 - generate-interview-questions : 자소서 기반 면접 예상 질문 생성
 
