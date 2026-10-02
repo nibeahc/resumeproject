@@ -17,6 +17,7 @@ import queue
 import re
 import threading
 from pathlib import Path
+from typing import NamedTuple, Optional
 
 from flask import (Blueprint, Response, current_app, jsonify, redirect, render_template,
                    request, stream_with_context, url_for)
@@ -56,6 +57,11 @@ _META_BLOCK = re.compile(r'===META===\n(?P<body>.*?)\n===END===', re.S)
 
 MAX_RETRIES = 1  # ROADMAP: 초과 시 재시도 1회
 
+# 매직넘버를 한곳에 모은다 (S11-5). 각 값의 근거는 PROGRESS.md 의 S1-1~S1-3 실측 기록이다.
+LENGTH_TOLERANCE = 0.05   # 목표 대비 이만큼 모자라면 다시 시킨다 (스킬 Step 9: 여유 있게 짧게 쓰기 금지)
+TARGET_UNDERSHOOT = 20    # 재시도 목표를 상한에 붙이지 않고 이만큼 아래로 둔다 (미세 오차 대비)
+MAX_CHAR_LIMIT = 10000    # 상한의 상한. 모델 max_tokens=3000 과 모순되는 값을 막는다
+
 # S11-4: "저장했다" 와 "제출해도 된다" 를 분리한다. 이 둘을 같은 값으로 묶어두면
 # (예전의 done → coverletter_ok=True) 글자수를 초과한 초안도 성공으로 보고된다.
 # 저장은 그대로 한다 — 사람이 손봐서 쓸 수 있으니 버리지 않는다. 다만 ready 로 올리지 않는다.
@@ -66,6 +72,30 @@ ISSUE_OVER_LIMIT = 'over_limit'
 ISSUE_UNDERSHOOT = 'undershoot'
 ISSUE_DROPPED_OVERRIDES = 'dropped_overrides'
 ISSUE_UNRESEARCHED_COMPANY = 'unresearched_company'
+
+
+class LengthSpec(NamedTuple):
+    """분량 요구사항 (S11-3).
+
+    예전에는 char_limit 양의 정수 하나뿐이라 "제한 없음" 을 표현할 방법이 없었다.
+    사용자가 제한을 안 주면 에러였고, 대화 경로에서 "제한 없음" 이라고 말해도 웹에는
+    그 상태가 존재하지 않았다 (검토 0.4).
+
+    mode='unlimited' 면 hard_max_chars 는 None 이고 글자수 재시도 루프를 돌지 않는다.
+    검토 C-3 의 soft_target_chars / detail_level 은 넣지 않았다 — 입력 UI 가 없으면
+    죽은 파라미터가 된다. 대신 "제한 없음 = 깊게 쓰기" 라는 뜻을 프롬프트 지시문에 담는다.
+    """
+    mode: str                      # 'bounded' | 'unlimited'
+    hard_max_chars: Optional[int]  # unlimited 면 None
+    count_mode: str                # '포함' | '제외'
+
+    @property
+    def bounded(self) -> bool:
+        return self.mode == 'bounded'
+
+    @property
+    def count_desc(self) -> str:
+        return '공백 포함' if self.count_mode == '포함' else '공백 제외'
 
 
 def count_chars(text, count_mode):
@@ -122,7 +152,7 @@ def strip_placeholder_rules(text: str) -> str:
     return result if any(_REAL_BULLET.match(ln) for ln in out) else ''
 
 
-def build_prompt(name, company, position, question, char_limit, count_mode,
+def build_prompt(name, company, position, question, length: 'LengthSpec',
                   profile_text, style_text, rules_text, interest_text,
                   company_text, reference_texts, selected_experiences, trends_text=''):
     exp_dump = '\n\n'.join(f'--- users/{name}/experiences/{fn} ---\n{text}' for fn, text in selected_experiences)
@@ -143,7 +173,23 @@ def build_prompt(name, company, position, question, char_limit, count_mode,
              f'- 지원동기는 기업 칭찬이 아니라 **직무 자체에 대한 관심과 본인 경험의 연결**로 쓰세요.'
     )
     rules_note = strip_placeholder_rules(rules_text) or '(비어 있음 — 적용할 규칙 없음, 무시)'
-    count_desc = '공백 포함' if count_mode == '포함' else '공백 제외'
+    # S11-3: 제한이 있을 때와 없을 때는 요구가 정반대다. 전자는 "넘기지 마라",
+    # 후자는 "짧게 끝내지 마라, 다만 경험을 더 늘리지도 마라" 다.
+    if length.bounded:
+        length_line = f'글자수: {length.hard_max_chars}자 ({length.count_desc})'
+        length_instruction = (
+            f'- 글자수는 최대한 {length.hard_max_chars}자에 가깝게 채우되 절대 넘기지 마세요 '
+            f'(여유를 약간 두는 편이 넘기는 것보다 낫습니다).'
+        )
+    else:
+        length_line = f'글자수: 제한 없음 (세는 기준은 {length.count_desc})'
+        length_instruction = (
+            '- 글자수 제한이 없습니다. 짧게 요약하지 마세요.\n'
+            '- 다만 **제한이 없다는 것은 경험을 더 끌어오라는 뜻이 아닙니다.** 주어진 경험의\n'
+            '  배경, 그때 본인이 내린 판단과 그 이유, 실행 과정, 결과, 직무와의 연결을\n'
+            '  충분히 깊게 쓰세요.\n'
+            '- 분량을 채우려고 추측이나 일반론을 덧붙이지 마세요. 쓸 근거가 떨어지면 거기서 끝내세요.'
+        )
     # 고도화(2026-09-27): lib/trends.py 가 한 달에 한 번 자동 조사해두는 최신 자소서 작성
     # 트렌드. 참고용일 뿐 writing-style.md/writing-rules.md 보다 우선하지 않는다 — Claude.md
     # 의 "반드시 해당 사용자의 writing-style.md 어투를 따를 것" 절대 원칙이 이 트렌드 참고보다
@@ -159,7 +205,7 @@ def build_prompt(name, company, position, question, char_limit, count_mode,
 기업명: {company}
 직무명: {position}
 문항: {question}
-글자수: {char_limit}자 ({count_desc})
+{length_line}
 
 Step 1(파일 읽기)은 아래에 이미 첨부되어 있습니다. Step 5~7(문항 분석, 유형 분류, 경험 선택)은
 코드가 이미 끝냈습니다 — 아래 [이미 선택된 경험]만 보고 Step 8(문단 작성)을 하세요.
@@ -197,7 +243,7 @@ Step 2, Step 4 는 아래 안내를 따르세요. Step 9(출력 형식), Step 10
 - 위에 주어진 경험만 사용하세요. 여러 경험이 있으면 자연스럽게 연결해서 서술하세요.
 - 선택한 경험 파일에 "⚠️ 오래된 경험" 표시가 있으면, 이 호출은 되물을 수 없으므로 일단 그대로 사용하되
   META 블록에 그 사실을 명시하세요.
-- 글자수는 최대한 {char_limit}자에 가깝게 채우되 절대 넘기지 마세요 (여유를 약간 두는 편이 넘기는 것보다 낫습니다).
+{length_instruction}
 - bullet point 금지, 문단 형식.
 
 [출력 형식 — 반드시 이 형식만 사용, 다른 설명 붙이지 말 것]
@@ -214,14 +260,15 @@ Step 2, Step 4 는 아래 안내를 따르세요. Step 9(출력 형식), Step 10
 """
 
 
-def build_retry_prompt(char_limit, count_mode, current_count, company=''):
+def build_retry_prompt(length: 'LengthSpec', current_count, company=''):
     """초과했을 때뿐 아니라, 많이 모자랄 때도 부른다 (스킬 Step 9: "여유 있게 짧게 쓰는 것 금지").
     목표를 하나의 정확한 숫자로 주고, 그 숫자에 맞춰 문장 단위로 더하거나 빼라고 구체적으로 지시한다.
     "권장"처럼 약한 표현을 쓰면 모델이 충분히 맞추지 않는 경향이 실측에서 확인되어, 지시를 강하게 바꿨다.
     """
-    count_desc = '공백 포함' if count_mode == '포함' else '공백 제외'
+    char_limit = length.hard_max_chars
+    count_desc = length.count_desc
     diff = current_count - char_limit
-    target = max(char_limit - 20, 1)  # 상한에 붙이지 않고 20자 정도 여유를 둔다 (미세 오차 대비)
+    target = max(char_limit - TARGET_UNDERSHOOT, 1)
 
     if diff > 0:
         direction = (
@@ -278,8 +325,8 @@ def _parse_use_trends(data):
 
 
 def _validate_generate_params(data):
-    """company/position/question/char_limit 검증. (errors, company, position, question,
-    char_limit, count_mode, override_files, use_trends) 를 돌려준다 — SSE 제너레이터가
+    """company/position/question/분량 검증. (errors, company, position, question,
+    length, override_files, use_trends, allow_unresearched) 를 돌려준다 — SSE 제너레이터가
     시작되기 *전에* 동기적으로 끝내야 한다 (S1-3 에서 겪은, 제너레이터 안에서 abort/에러 내면
     이미 200이 나간 뒤라 늦다는 패턴을 여기서도 피한다)."""
     company = (data.get('company') or '').strip()
@@ -300,13 +347,21 @@ def _validate_generate_params(data):
         errors.append('직무명에 사용할 수 없는 문자가 있습니다. (/ \\ .. 등)')
     if not question:
         errors.append('문항이 없습니다.')
-    try:
-        char_limit = int(data.get('char_limit'))
-        if char_limit <= 0:
-            raise ValueError
-    except (TypeError, ValueError):
-        char_limit = None
-        errors.append('글자수(char_limit)가 없거나 올바르지 않습니다. 반드시 숫자로 지정해야 합니다.')
+    # S11-3: "글자수 미입력" 과 "제한 없음" 은 다른 상태다. 예전엔 둘 다 에러였다.
+    length_mode = (data.get('length_mode') or 'bounded').strip().lower()
+    if length_mode not in ('bounded', 'unlimited'):
+        length_mode = 'bounded'
+    char_limit = None
+    if length_mode == 'bounded':
+        try:
+            char_limit = int(data.get('char_limit'))
+            if not (0 < char_limit <= MAX_CHAR_LIMIT):
+                raise ValueError
+        except (TypeError, ValueError):
+            char_limit = None
+            errors.append(f'글자수(char_limit)가 없거나 올바르지 않습니다. '
+                          f'1~{MAX_CHAR_LIMIT} 사이 숫자를 지정하거나 length_mode=unlimited 를 보내세요.')
+    length = LengthSpec(mode=length_mode, hard_max_chars=char_limit, count_mode=count_mode)
 
     override_files = data.get('experience_files')
     if isinstance(override_files, str):
@@ -317,11 +372,11 @@ def _validate_generate_params(data):
     # 동의 없이 추론으로 채우는 것이 검토 0.1 의 핵심 지적이었다.
     allow_unresearched = _parse_bool(data, 'allow_unresearched', default=False)
 
-    return (errors, company, position, question, char_limit, count_mode, override_files,
+    return (errors, company, position, question, length, override_files,
             use_trends, allow_unresearched)
 
 
-def coverletter_events(name, root, company, position, question, char_limit, count_mode,
+def coverletter_events(name, root, company, position, question, length: 'LengthSpec',
                         override_files=None, folder_name=None, use_trends=True,
                         allow_unresearched_company=False):
     """자소서 한 문항을 생성해 저장하고, (event, data) 튜플을 yield 하는 순수 제너레이터.
@@ -416,7 +471,7 @@ def coverletter_events(name, root, company, position, question, char_limit, coun
                         'company_cached': bool(company_text.strip()), 'references': len(reference_texts)}
 
     system = load_skill('write-coverletter')
-    user_msg = build_prompt(name, company, position, question, char_limit, count_mode,
+    user_msg = build_prompt(name, company, position, question, length,
                              profile_text, style_text, rules_text, interest_text,
                              company_text, reference_texts, selected_experiences, trends_text)
     messages = [{'role': 'user', 'content': user_msg}]
@@ -453,21 +508,26 @@ def coverletter_events(name, root, company, position, question, char_limit, coun
         return
 
     answer, meta = parse_answer(result['text'])
-    actual = count_chars(answer, count_mode)
-    yield 'progress', {'stage': 'draft', 'chars': actual, 'limit': char_limit}
+    actual = count_chars(answer, length.count_mode)
+    yield 'progress', {'stage': 'draft', 'chars': actual, 'limit': length.hard_max_chars,
+                        'length_mode': length.mode}
 
     # exceeded 는 "초과했다" 라는 뜻 그대로 유지한다 (파일 경고, 완료 이벤트, ROADMAP 완료 조건이
     # 전부 이 이름으로 추적한다). 재시도를 시킬지 여부(needs_retry)는 이보다 넓다 — 스킬 Step 9 가
     # "여유 있게 짧게 쓰는 것 금지" 라고 못박았으므로, 많이 모자란 경우도 다시 시킨다.
     retries = 0
-    exceeded = actual > char_limit
-    needs_retry = exceeded or abs(actual - char_limit) / char_limit > 0.05
+    exceeded = False
+    needs_retry = False
+    if length.bounded:
+        # S11-3: 제한이 없으면 "초과" 도 "모자람" 도 정의되지 않는다. 재시도 루프를 통째로 건넌다.
+        exceeded = actual > length.hard_max_chars
+        needs_retry = exceeded or abs(actual - length.hard_max_chars) / length.hard_max_chars > LENGTH_TOLERANCE
     while needs_retry and retries < MAX_RETRIES:
         retries += 1
-        yield 'progress', {'stage': 'retry', 'attempt': retries, 'diff': actual - char_limit}
+        yield 'progress', {'stage': 'retry', 'attempt': retries, 'diff': actual - length.hard_max_chars}
         messages = messages + [
             {'role': 'assistant', 'content': result['text']},
-            {'role': 'user', 'content': build_retry_prompt(char_limit, count_mode, actual, company)},
+            {'role': 'user', 'content': build_retry_prompt(length, actual, company)},
         ]
         try:
             result = yield from call_llm(messages)
@@ -475,9 +535,9 @@ def coverletter_events(name, root, company, position, question, char_limit, coun
             yield 'error', {'message': f'재시도 중 LLM 호출 실패: {e}'}
             return
         answer, meta = parse_answer(result['text'])
-        actual = count_chars(answer, count_mode)
-        exceeded = actual > char_limit
-        needs_retry = exceeded or abs(actual - char_limit) / char_limit > 0.05
+        actual = count_chars(answer, length.count_mode)
+        exceeded = actual > length.hard_max_chars
+        needs_retry = exceeded or abs(actual - length.hard_max_chars) / length.hard_max_chars > LENGTH_TOLERANCE
 
     if not answer:
         yield 'error', {'message': 'LLM 출력에서 ANSWER 블록을 찾지 못했습니다.', 'raw': result['text'][:500]}
@@ -497,14 +557,16 @@ def coverletter_events(name, root, company, position, question, char_limit, coun
     out_path = safe_path(out_dir, folder_name or f'{company}_{position}', '자소서.md')
     out_path.parent.mkdir(parents=True, exist_ok=True)
     today = __import__('datetime').date.today().strftime('%Y.%m.%d')
-    exceeded_note = f'\n⚠️ 글자수 초과: {actual}자 (제한 {char_limit}자, {actual - char_limit}자 초과, 재시도 {retries}회 후에도 초과)\n' if exceeded else ''
+    exceeded_note = (f'\n⚠️ 글자수 초과: {actual}자 (제한 {length.hard_max_chars}자, '
+                     f'{actual - length.hard_max_chars}자 초과, 재시도 {retries}회 후에도 초과)\n') if exceeded else ''
+    length_desc = (f'목표 {length.hard_max_chars}자' if length.bounded else '길이 제한 없음')
     # S11-1: 열화 모드로 쓴 글은 파일에도 흔적을 남긴다. 나중에 이 파일만 열어본 사람이
     # 기업 근거가 없는 초안이라는 걸 알 수 있어야 한다.
     unresearched_note = (f'\n⚠️ 기업 정보 미조사: companies/{company}.md 없이 사용자 동의 하에 작성됨. '
                          f'기업 관련 서술을 반드시 직접 확인하세요.\n'
                          if ISSUE_UNRESEARCHED_COMPANY in issues else '')
     entry = f"""## {question}
-글자수: {actual}자 ({'공백 포함' if count_mode == '포함' else '공백 제외'}, 목표 {char_limit}자){exceeded_note}{unresearched_note}
+글자수: {actual}자 ({length.count_desc}, {length_desc}){exceeded_note}{unresearched_note}
 
 {answer}
 
@@ -521,8 +583,9 @@ def coverletter_events(name, root, company, position, question, char_limit, coun
         'answer': answer,
         'meta': meta,
         'chars': actual,
-        'limit': char_limit,
-        'count_mode': count_mode,
+        'limit': length.hard_max_chars,
+        'length_mode': length.mode,
+        'count_mode': length.count_mode,
         'exceeded': exceeded,
         'retries': retries,
         # S11-4: 자동 검사 결과. ready_for_user 는 "검사를 통과했다" 이지
@@ -542,7 +605,7 @@ def coverletter_events(name, root, company, position, question, char_limit, coun
 def generate(name):
     root = user_dir(name)
     data = request.get_json(silent=True) or request.form
-    (errors, company, position, question, char_limit, count_mode, override_files,
+    (errors, company, position, question, length, override_files,
      use_trends, allow_unresearched) = _validate_generate_params(data)
 
     if errors:
@@ -552,7 +615,7 @@ def generate(name):
 
     def stream():
         for event, ev_data in coverletter_events(name, root, company, position, question,
-                                                  char_limit, count_mode, override_files,
+                                                  length, override_files,
                                                   use_trends=use_trends,
                                                   allow_unresearched_company=allow_unresearched):
             yield sse(event, ev_data)
@@ -575,7 +638,7 @@ def generate_bundle(name):
     if not job_id_raw.isdigit():
         return jsonify(success=False, error='공고를 선택해주세요.'), 400
 
-    (errors, _, _, question, char_limit, count_mode, override_files,
+    (errors, _, _, question, length, override_files,
      use_trends, allow_unresearched) = _validate_generate_params(
         {**data, 'company': 'x', 'position': 'x'})  # company/position 은 공고에서 가져오므로 폼 값 검증은 건너뜀
     errors = [e for e in errors if '기업명' not in e and '직무명' not in e]
@@ -628,8 +691,8 @@ def generate_bundle(name):
 
         coverletter_ok, coverletter_error, coverletter_path = False, None, None
         coverletter_status, coverletter_issues = None, []
-        for event, ev_data in coverletter_events(name, root, company, position, question, char_limit,
-                                                  count_mode, override_files, folder_name=folder_name,
+        for event, ev_data in coverletter_events(name, root, company, position, question, length,
+                                                  override_files, folder_name=folder_name,
                                                   use_trends=use_trends,
                                                   allow_unresearched_company=allow_unresearched):
             tagged = dict(ev_data)

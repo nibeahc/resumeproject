@@ -13,6 +13,10 @@ from web import create_app  # noqa: E402
 from web.routes import generate as generate_route  # noqa: E402
 
 
+def bounded(n, count_mode='포함'):
+    return generate_route.LengthSpec(mode='bounded', hard_max_chars=n, count_mode=count_mode)
+
+
 def llm_result(text):
     return {'text': text, 'stop_reason': 'end_turn',
             'usage': {'input_tokens': 1, 'output_tokens': 1, 'thinking_tokens': 0}}
@@ -79,7 +83,7 @@ class StripPlaceholderRulesTest(unittest.TestCase):
 
     def test_prompt_does_not_carry_placeholders(self):
         prompt = generate_route.build_prompt(
-            '홍길동', '기업', '직무', '문항', 100, '포함',
+            '홍길동', '기업', '직무', '문항', bounded(100),
             '프로필', '문체', '## 선호하는 문단 길이\n\n- (예: 문항당 최대 3문장, 핵심만)\n',
             '관심직무', '', [], [('a.md', '경험')])
         self.assertNotIn('3문장', prompt)
@@ -359,6 +363,49 @@ class GenerateRouteTest(unittest.TestCase):
         with patch.object(generate_route, 'stream_complete', return_value=fake):
             body = self.post().get_data(as_text=True)
         self.assertIn('"rel_path": "테스트기업_테스트직무/자소서.md"', body)
+
+    def test_unlimited_mode_skips_retry_and_never_exceeds(self):
+        """S11-3 / 검토 0.4: 예전엔 char_limit 이 양의 정수여야만 해서 "제한 없음" 이라는
+        상태 자체가 없었다. 제한이 없으면 초과도 모자람도 정의되지 않으므로 재시도하지 않는다."""
+        long_answer = '가' * 900
+        fake = llm_result(f'===ANSWER===\n{long_answer}\n===END===\n===META===\nx\n===END===\n')
+        with patch.object(generate_route, 'stream_complete', return_value=fake) as m:
+            body = self.post(length_mode='unlimited', char_limit=None).get_data(as_text=True)
+        self.assertEqual(m.call_count, 1)          # 100자 목표였다면 재시도했을 길이다
+        self.assertNotIn('"stage": "retry"', body)
+        self.assertIn('"exceeded": false', body)
+        self.assertIn('"length_mode": "unlimited"', body)
+        self.assertIn('"status": "ready_for_user"', body)
+
+    def test_unlimited_mode_needs_no_char_limit(self):
+        fake = llm_result('===ANSWER===\n내용\n===END===\n===META===\nx\n===END===\n')
+        with patch.object(generate_route, 'stream_complete', return_value=fake) as m:
+            body = self.post(length_mode='unlimited', char_limit=None).get_data(as_text=True)
+        self.assertEqual(m.call_count, 1)
+        self.assertNotIn('글자수(char_limit)가 없거나', body)
+
+    def test_unlimited_prompt_says_deeper_not_more_experiences(self):
+        """제한 없음을 "경험을 더 끌어와라" 로 읽으면 안 된다 (검토 C-3)."""
+        fake = llm_result('===ANSWER===\n내용\n===END===\n===META===\nx\n===END===\n')
+        with patch.object(generate_route, 'stream_complete', return_value=fake) as m:
+            self.post(length_mode='unlimited', char_limit=None).get_data()
+        sent = m.call_args.kwargs['messages'][0]['content']
+        self.assertIn('제한 없음', sent)
+        self.assertIn('경험을 더 끌어오라는 뜻이 아닙니다', sent)
+
+    def test_char_limit_upper_bound_rejected(self):
+        """S11-3: 상한이 없어 max_tokens=3000 과 모순되는 값도 통과했다."""
+        with patch.object(generate_route, 'stream_complete') as m:
+            body = self.post(char_limit=999999).get_data(as_text=True)
+        m.assert_not_called()
+        self.assertIn('글자수', body)
+
+    def test_unlimited_saved_header_says_no_limit(self):
+        fake = llm_result('===ANSWER===\n내용입니다\n===END===\n===META===\nx\n===END===\n')
+        with patch.object(generate_route, 'stream_complete', return_value=fake):
+            self.post(length_mode='unlimited', char_limit=None).get_data()
+        saved = (self.root / 'outputs' / '홍길동' / '테스트기업_테스트직무' / '자소서.md').read_text(encoding='utf-8')
+        self.assertIn('길이 제한 없음', saved)
 
     def test_count_mode_excludes_whitespace(self):
         answer = ('가 ' * 69).strip()  # 공백 제외 69자 → 70자 목표 대비 오차 1.4%, 재시도 불필요

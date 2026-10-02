@@ -107,13 +107,22 @@
     <div>
       <label class="form-label">글자수</label>
       <div class="char-row">
-        <input class="form-input" type="number" id="charLimit" min="1" placeholder="800" required>
+        <input class="form-input" type="number" id="charLimit" min="1" max="10000" placeholder="800" required>
         <span style="font-size:13px; color:#6e6e73;">자</span>
         <div class="radio-group" style="margin-left:12px;">
           <label><input type="radio" name="countMode" value="포함" checked> 공백 포함</label>
           <label><input type="radio" name="countMode" value="제외"> 공백 제외</label>
         </div>
       </div>
+      <!-- S11-3: "글자수 미입력" 과 "제한 없음" 은 다른 상태다. 예전엔 둘 다 에러였다. -->
+      <div class="radio-group" style="margin-top:8px;">
+        <label><input type="radio" name="lengthMode" value="bounded" checked onchange="onLengthModeChange()"> 제한 있음</label>
+        <label><input type="radio" name="lengthMode" value="unlimited" onchange="onLengthModeChange()"> 제한 없음</label>
+      </div>
+      <p style="font-size:11px; color:#6e6e73; margin:4px 0 0;">
+        제한 없음은 "길게 쓰라" 가 아니라 "고른 경험을 더 깊게 쓰라" 는 뜻입니다.
+        경험을 더 끌어오거나 분량을 채우려 추측을 덧붙이지 않습니다.
+      </p>
     </div>
     <div style="margin-top:14px; padding-top:14px; border-top:1px solid #f0f0f5;">
       <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:#1d1d1f; cursor:pointer;">
@@ -376,6 +385,18 @@ async function generateBundle() {
   }
 }
 
+function lengthMode() {
+  const el = document.querySelector('input[name="lengthMode"]:checked');
+  return el ? el.value : 'bounded';
+}
+
+function onLengthModeChange() {
+  const unlimited = lengthMode() === 'unlimited';
+  const input = document.getElementById('charLimit');
+  input.disabled = unlimited;
+  input.required = !unlimited;
+}
+
 async function generate(overrideFiles, opts = {}) {
   const company = document.getElementById('company').value.trim();
   const position = document.getElementById('position').value.trim();
@@ -383,8 +404,9 @@ async function generate(overrideFiles, opts = {}) {
   const charLimit = document.getElementById('charLimit').value;
   const countMode = document.querySelector('input[name="countMode"]:checked').value;
   const useTrends = document.getElementById('useTrends').checked;
+  const mode = lengthMode();
 
-  if (!company || !position || !question || !charLimit) {
+  if (!company || !position || !question || (mode === 'bounded' && !charLimit)) {
     toast('모든 항목을 입력해주세요.');
     return;
   }
@@ -402,7 +424,8 @@ async function generate(overrideFiles, opts = {}) {
   document.getElementById('progressTitle').textContent = overrideFiles ? '재생성 중...' : '생성 중...';
 
   try {
-    const body = { company, position, question, char_limit: charLimit, count_mode: countMode, use_trends: useTrends };
+    const body = { company, position, question, char_limit: charLimit, count_mode: countMode,
+                   use_trends: useTrends, length_mode: mode };
     if (overrideFiles && overrideFiles.length) body.experience_files = overrideFiles;
     if (opts.allowUnresearched) body.allow_unresearched = true;   // S11-1: 사용자가 명시적으로 동의한 경우에만
 
@@ -503,7 +526,9 @@ function showResult(question, data) {
   document.getElementById('metaText').textContent = data.meta;
 
   const badge = document.getElementById('charBadge');
-  badge.textContent = `${data.chars}자 / 목표 ${data.limit}자`;
+  badge.textContent = data.length_mode === 'unlimited'
+    ? `${data.chars}자 (제한 없음)`
+    : `${data.chars}자 / 목표 ${data.limit}자`;
   badge.className = 'char-badge ' + (data.exceeded ? 'char-over' : 'char-ok');
 
   // S11-4: 글자수 초과만이 아니라 "사람이 봐야 하는 사유" 전부를 보여준다.
