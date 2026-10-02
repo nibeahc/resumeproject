@@ -38,6 +38,10 @@ TYPE_PREFERRED_CATEGORY = {
     '성장형': '성장·실패',
 }
 
+# Claude.md "경험 사용 원칙" 이 이 값의 정식 출처다 (최대 2개, 기본 1개).
+# 여기 숫자를 바꾸기 전에 그 절을 먼저 고친다.
+MAX_EXPERIENCES = 2
+
 _META_FIELD = re.compile(r'^- (시기|기관명|역할|카테고리|키워드): (.+)$', re.M)
 _TITLE = re.compile(r'^# (.+)$', re.M)
 
@@ -233,10 +237,17 @@ def rank_experiences(question: str, experiences: List[Experience],
     return q_type, candidates
 
 
-def pick(candidates: List[Candidate], max_count: int = 2) -> List[Candidate]:
+def pick(candidates: List[Candidate], max_count: int = MAX_EXPERIENCES) -> List[Candidate]:
     """Step 7 경험 선택 원칙: 최대 2개, 기본 1개. 두 번째는 점수가 있고(0점 제외) 이유가 있을
     때만, 그리고 첫 번째와 카테고리가 겹치거나 점수 차가 크지 않을 때만 포함한다
-    ("두 경험이 자연스럽게 연결되어야 한다")."""
+    ("두 경험이 자연스럽게 연결되어야 한다").
+
+    **한계(S11-2에서 명시)**: 아래 조건은 *검색 휴리스틱*이지, 두 경험이 하나의 논지를
+    함께 받친다는 *검증*이 아니다. 카테고리가 겹치거나 점수가 비슷하다는 것은
+    "둘 다 분석 경험이다" 수준의 근거일 뿐이고, 두 번째 경험을 빼면 논증이 실제로
+    약해지는지는 이 함수가 알지 못한다. 그 판정은 S11-10(논지 계획 + 검토 호출)이 맡는다.
+    여기서는 후보를 좁히기만 하고, 근거는 Candidate.reasons 로 그대로 드러낸다.
+    """
     if not candidates:
         return []
     top = [candidates[0]]
@@ -250,20 +261,36 @@ def pick(candidates: List[Candidate], max_count: int = 2) -> List[Candidate]:
 
 
 def select(exp_dir: Path, question: str, interest_text: str = '',
-           max_count: int = 2, override_filenames: Optional[List[str]] = None):
+           max_count: int = MAX_EXPERIENCES, override_filenames: Optional[List[str]] = None):
     """전체 흐름. override_filenames 를 주면 알고리즘을 건너뛰고 그 파일들을 그대로 쓴다
     (S3-2 UI 에서 사용자가 직접 고른 경우). 그래도 순위 목록(candidates)은 항상 함께 돌려준다 —
     UI 가 "왜 다른 경험이 후보였는지"를 보여줄 수 있어야 하기 때문이다.
 
-    반환: {'question_type', 'candidates': [Candidate, ...], 'selected': [Candidate, ...]}
+    **S11-2**: 예전에는 override 경로가 max_count 를 통째로 무시했고, 모르는 파일명을
+    조용히 버렸다. UI 가 2개로 제한해도 API 를 직접 부르면 몇 개든 들어갔고, 파일명에
+    오타가 있으면 아무 말 없이 빠진 채 생성됐다(전부 틀리면 경험 0개로 글을 썼다).
+
+    이 함수는 **판정하지 않고 보고한다.** 중단할지 경고만 할지는 호출자가 정한다 —
+    웹은 에러 이벤트, 대화형은 되묻기처럼 경로마다 처리가 다르기 때문이다.
+
+    반환: {'question_type', 'candidates', 'selected',
+           'unknown_overrides': 존재하지 않는 파일명,
+           'dropped_overrides': 상한을 넘어 잘린 파일명}
     """
     experiences = load_all_experiences(exp_dir)
     q_type, candidates = rank_experiences(question, experiences, interest_text)
 
+    unknown_overrides: List[str] = []
+    dropped_overrides: List[str] = []
+
     if override_filenames:
         by_name = {c.experience.filename: c for c in candidates}
-        selected = [by_name[f] for f in override_filenames if f in by_name]
+        unknown_overrides = [f for f in override_filenames if f not in by_name]
+        chosen = [by_name[f] for f in override_filenames if f in by_name]
+        dropped_overrides = [c.experience.filename for c in chosen[max_count:]]
+        selected = chosen[:max_count]
     else:
         selected = pick(candidates, max_count)
 
-    return {'question_type': q_type, 'candidates': candidates, 'selected': selected}
+    return {'question_type': q_type, 'candidates': candidates, 'selected': selected,
+            'unknown_overrides': unknown_overrides, 'dropped_overrides': dropped_overrides}

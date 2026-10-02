@@ -230,6 +230,23 @@ class SelectTest(unittest.TestCase):
         r = S.select(self.tmp, '아무 질문', override_filenames=['2022-a.md', '없는파일.md'])
         self.assertEqual([c.experience.filename for c in r['selected']], ['2022-a.md'])
 
+    def test_override_미지_파일명은_보고된다(self):
+        """S11-2: selected 에서 빼는 동작은 그대로 두고(위 테스트), 조용히 버리지 않고
+        unknown_overrides 로 보고한다. 중단 여부는 호출자가 정한다."""
+        r = S.select(self.tmp, '아무 질문', override_filenames=['2022-a.md', '없는파일.md'])
+        self.assertEqual(r['unknown_overrides'], ['없는파일.md'])
+        self.assertEqual(r['dropped_overrides'], [])
+
+    def test_override도_상한을_지킨다(self):
+        """S11-2: 예전엔 override 경로가 max_count 를 통째로 무시해서 몇 개든 들어갔다."""
+        r = S.select(self.tmp, '아무 질문',
+                     max_count=1, override_filenames=['2022-a.md', '2024-b.md'])
+        self.assertEqual([c.experience.filename for c in r['selected']], ['2022-a.md'])
+        self.assertEqual(r['dropped_overrides'], ['2024-b.md'])
+
+    def test_기본_상한은_Claude_md_의_2개(self):
+        self.assertEqual(S.MAX_EXPERIENCES, 2)
+
     def test_경험이_하나도_없으면_빈_목록(self):
         empty_dir = self.tmp / 'empty'
         empty_dir.mkdir()

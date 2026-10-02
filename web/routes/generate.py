@@ -24,6 +24,7 @@ from flask import (Blueprint, Response, current_app, jsonify, redirect, render_t
 from lib import db, matcher, portfolio, resume, trends
 from lib.llm import stream_complete
 from lib.resume import _safe_folder_name
+from lib.selector import MAX_EXPERIENCES
 from lib.selector import select as select_experiences
 from lib.skills import load_skill
 from web.data import get_open_jobs
@@ -63,6 +64,7 @@ STATUS_REVIEW_REQUIRED = 'review_required'  # 저장은 됐지만 사람이 봐�
 
 ISSUE_OVER_LIMIT = 'over_limit'
 ISSUE_UNDERSHOOT = 'undershoot'
+ISSUE_DROPPED_OVERRIDES = 'dropped_overrides'
 
 
 def count_chars(text, count_mode):
@@ -341,7 +343,29 @@ def coverletter_events(name, root, company, position, question, char_limit, coun
 
     # Step 5~7: 경험 선택은 LLM 이 아니라 코드가 한다 (S3-1). 선택된 것만 프롬프트에 실린다.
     selection = select_experiences(exp_dir, question, interest_text=interest_text,
-                                    max_count=2, override_filenames=override_files)
+                                    max_count=MAX_EXPERIENCES, override_filenames=override_files)
+
+    # S11-2: selector 는 보고만 한다. 중단 여부는 여기서 정한다.
+    # UI 가 체크박스를 2개로 묶어도 API 를 직접 부르면 그냥 들어왔다 — 서비스 쪽에서 막아야 한다.
+    if selection['unknown_overrides']:
+        yield 'error', {
+            'message': '지정한 경험 파일을 찾을 수 없습니다: '
+                       + ', '.join(selection['unknown_overrides']),
+            'unknown_overrides': selection['unknown_overrides'],
+        }
+        return
+    if not selection['selected']:
+        yield 'error', {'message': '사용할 경험이 하나도 선택되지 않았습니다. 경험을 선택한 뒤 다시 시도하세요.'}
+        return
+    if selection['dropped_overrides']:
+        # 자르고 계속한다. 사용자가 고른 것을 통째로 버리는 것보다 낫지만, 고른 대로
+        # 나오지 않았으니 사람이 확인해야 한다.
+        issues.append(ISSUE_DROPPED_OVERRIDES)
+        yield 'progress', {'stage': 'overrides_trimmed',
+                            'kept': [c.experience.filename for c in selection['selected']],
+                            'dropped': selection['dropped_overrides'],
+                            'max': MAX_EXPERIENCES}
+
     selected_experiences = [(c.experience.filename, c.experience.path.read_text(encoding='utf-8'))
                              for c in selection['selected']]
     yield 'progress', {

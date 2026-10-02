@@ -255,6 +255,38 @@ class GenerateRouteTest(unittest.TestCase):
         saved = (self.root / 'outputs' / '홍길동' / '테스트기업_테스트직무' / '자소서.md').read_text(encoding='utf-8')
         self.assertIn('⚠️ 글자수 초과', saved)  # 저장은 하되 숨기지 않고 경고를 남긴다
 
+    def test_unknown_override_file_rejected(self):
+        """S11-2: 오타난 파일명이 섞이면 조용히 빼고 쓰지 말고 멈춰야 한다."""
+        with patch.object(generate_route, 'stream_complete') as m:
+            body = self.post(experience_files=['2024-테스트경험.md', '없는파일.md']).get_data(as_text=True)
+        m.assert_not_called()
+        self.assertIn('찾을 수 없습니다', body)
+        self.assertIn('없는파일.md', body)
+
+    def test_override_over_max_is_trimmed_and_flagged(self):
+        """S11-2: UI 를 거치지 않고 직접 호출해도 상한이 걸려야 한다."""
+        (self.root / 'users' / '홍길동' / 'experiences' / '2022-셋째경험.md').write_text(
+            '# 셋째 경험\n\n## 메타\n\n- 카테고리: 리더십\n\n내용', encoding='utf-8')
+        fake = llm_result('===ANSWER===\n' + '가' * 97 + '\n===END===\n===META===\nx\n===END===\n')
+        with patch.object(generate_route, 'stream_complete', return_value=fake) as m:
+            body = self.post(experience_files=[
+                '2024-테스트경험.md', '2023-다른경험.md', '2022-셋째경험.md']).get_data(as_text=True)
+        self.assertEqual(m.call_count, 1)
+        self.assertIn('"stage": "overrides_trimmed"', body)
+        self.assertIn('"dropped_overrides"', body)
+        self.assertIn('"status": "review_required"', body)
+        # 잘린 경험의 전문이 프롬프트에 실리면 안 된다
+        sent = m.call_args.kwargs['messages'][0]['content']
+        self.assertNotIn('셋째 경험', sent)
+
+    def test_all_overrides_unknown_does_not_generate_with_zero_experiences(self):
+        """S11-2: 전부 틀리면 selected 가 비는데, 예전엔 빈 선택 가드가 없어
+        경험 0개짜리 프롬프트로 글을 썼다."""
+        with patch.object(generate_route, 'stream_complete') as m:
+            body = self.post(experience_files=['없는1.md', '없는2.md']).get_data(as_text=True)
+        m.assert_not_called()
+        self.assertIn('찾을 수 없습니다', body)
+
     def test_over_limit_marks_review_required(self):
         """S11-4: 저장은 하되 ready 로 올리지 않는다. 기존 test_still_over_after_retry_flagged_not_hidden
         이 보장하는 "숨기지 않는다" 에 더해, 성공으로 표시하지도 않는지를 본다."""
