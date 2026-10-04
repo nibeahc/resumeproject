@@ -174,3 +174,103 @@ class DefaultDbGuardTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SourceScopeTest(unittest.TestCase):
+    """출처마다 증명할 수 있는 것이 다르다 (S11-18, 2차 설계검토 3-1).
+
+    핵심 명제: **어딘가에 같은 단어가 있는 것과 그 주장이 참인 것은 다르다.**
+    """
+
+    def srcs(self):
+        return [C.Source('experience', '창고에서 120건의 입출고를 확인하였다'),
+                C.Source('job', '연간 2500만 건 처리, SAP/WMS 활용, 30kg 이하 화물'),
+                C.Source('company', '한국 법인 직원 246명')]
+
+    def test_own_number_is_not_flagged(self):
+        self.assertEqual(C.find_jd_only_facts('120건을 처리했습니다.', self.srcs()), [])
+
+    def test_number_only_in_job_posting_is_flagged(self):
+        out = C.find_jd_only_facts('2500만 건을 처리했습니다.', self.srcs())
+        self.assertEqual(len(out), 1)
+        self.assertIn('2500', out[0])
+        self.assertIn('직무', out[0])
+
+    def test_number_only_in_company_file_is_flagged(self):
+        out = C.find_jd_only_facts('직원 246명 규모에서 일했습니다.', self.srcs())
+        self.assertTrue(out and '246' in out[0])
+
+    def test_future_plan_is_not_a_factual_claim(self):
+        """"입사 후 익히겠습니다" 는 주장이 아니라 계획이다 (검토 3-2)."""
+        self.assertEqual(C.find_jd_only_facts('2500만 건을 처리하겠습니다.', self.srcs()), [])
+
+    def test_find_unverified_facts_still_accepts_plain_strings(self):
+        nums, orgs = C.find_unverified_facts('37%를 줄였습니다.', ['내용에 숫자 없음'])
+        self.assertEqual(nums, ['37'])
+
+
+class JdTermClaimTest(unittest.TestCase):
+    """검토 3-1 의 SAP 예시. 공고에 SAP 가 있다고 SAP 경험이 생기지는 않는다."""
+
+    EXPERIENCES = ['엑셀로 예약 대장을 관리하였다']
+
+    def test_extracts_tool_names_from_requirements(self):
+        self.assertEqual(C.jd_terms(['SAP/WMS 활용 경험', 'Excel 중급 이상']),
+                         ['SAP', 'WMS', 'Excel'])
+
+    def test_common_english_words_are_not_terms(self):
+        self.assertEqual(C.jd_terms(['experience with and of the']), ['experience'])
+
+    def test_claiming_a_jd_tool_without_evidence_is_flagged(self):
+        out = C.check_jd_claims('SAP로 재고를 관리했습니다.', ['SAP', 'WMS'], self.EXPERIENCES)
+        self.assertEqual(out, ['SAP'])
+
+    def test_intent_to_learn_is_allowed(self):
+        out = C.check_jd_claims('입사 후 SAP를 익히겠습니다.', ['SAP'], self.EXPERIENCES)
+        self.assertEqual(out, [])
+
+    def test_tool_present_in_experience_passes(self):
+        out = C.check_jd_claims('SAP로 재고를 관리했습니다.', ['SAP'],
+                                ['SAP 모듈로 재고를 조회하였다'])
+        self.assertEqual(out, [])
+
+
+class JdScopeInGenerationTest(EngineFixture, unittest.TestCase):
+    def test_generation_flags_unsupported_jd_tool(self):
+        job = {'company': '기업', 'position': '직무',
+               'required_json': '["SAP 활용 경험", "WMS 운영"]'}
+        ctx = self.ctx(job=job)
+        answer = 'SAP로 재고를 관리했습니다. ' + '가' * 80
+        events = dict(self.run_events(context=ctx, length=bounded(200),
+                                      complete=fake_complete(answer=answer)))
+        done = events['done']
+        self.assertIn(C.ISSUE_JD_TERM_UNSUPPORTED, done['issues'])
+        self.assertEqual(done['jd_terms_unsupported'], ['SAP'])
+        self.assertEqual(done['status'], C.STATUS_REVIEW_REQUIRED)
+
+    def test_clean_draft_has_no_jd_scope_issue(self):
+        job = {'company': '기업', 'position': '직무', 'required_json': '["SAP 활용 경험"]'}
+        events = dict(self.run_events(context=self.ctx(job=job), length=bounded(200),
+                                      complete=fake_complete(answer='가' * 190)))
+        done = events['done']
+        self.assertNotIn(C.ISSUE_JD_TERM_UNSUPPORTED, done['issues'])
+        self.assertNotIn(C.ISSUE_FACT_FROM_JD_ONLY, done['issues'])
+
+
+class PerceptionIsNotAClaimTest(unittest.TestCase):
+    """실사용 중 발견한 오탐 회귀 방지 (S11-18).
+
+    "퀴네앤드나겔이 2030년까지 가장 신뢰받는 공급망 파트너가 되겠다고 밝힌 것을 보았습니다"
+    는 기업 사실을 기업 것으로 제대로 귀속한 문장이다. 무언가를 본 것은 한 것이 아니다.
+    """
+
+    SRCS = [C.Source('experience', '창고에서 일하였다'),
+            C.Source('company', 'Vision 2030: 가장 신뢰받는 공급망 파트너')]
+
+    def test_seeing_a_company_fact_is_not_a_self_claim(self):
+        s = '퀴네앤드나겔이 2030년까지 가장 신뢰받는 공급망 파트너가 되겠다고 밝힌 것을 보았습니다.'
+        self.assertFalse(C.is_self_claim(s))
+        self.assertEqual(C.find_jd_only_facts(s, self.SRCS), [])
+
+    def test_doing_is_still_a_claim(self):
+        self.assertTrue(C.is_self_claim('2030건을 처리했습니다.'))

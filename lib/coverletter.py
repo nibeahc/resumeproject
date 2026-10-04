@@ -136,6 +136,10 @@ ISSUE_DUPLICATE_OVERRIDE = 'duplicate_override'
 ISSUE_UNEXPLAINED_NAME = 'unexplained_name'   # S11-12
 ISSUE_SECTION_NOT_FOUND = 'section_not_found'  # S11-13
 ISSUE_PLAN_MISSING_WARRANT = 'plan_missing_warrant'  # S11-14
+# S11-18: 출처별 증명 범위. 공고에 적혀 있다는 것은 직무가 그것을 요구한다는 뜻이지
+# 지원자가 그 일을 했다는 뜻이 아니다 (2차 설계검토 3-1).
+ISSUE_FACT_FROM_JD_ONLY = 'fact_from_jd_only'
+ISSUE_JD_TERM_UNSUPPORTED = 'jd_term_unsupported'
 
 
 
@@ -515,16 +519,135 @@ def _normalize_number(s: str) -> str:
     return s[:-1] if s.endswith('.') else s
 
 
-def find_unverified_facts(answer: str, sources: List[str]) -> Tuple[List[str], List[str]]:
-    """초안에 나온 수치와 기관명 중 어떤 출처에도 없는 것을 찾는다.
-    (미확인 수치, 미확인 기관명). 설계검토 A-1 의 "수치·기관명·역할의 불일치를 탐지".
+# ---------------------------------------------------------------------------
+# 출처별 증명 범위 (S11-18, 2차 설계검토 3-1)
+#
+# 예전엔 경험·공고·기업 자료를 한 덩어리로 이어 붙여 "이 문자열이 어딘가 있는가" 만
+# 봤다. 그러면 공고에 SAP 가 적혀 있다는 이유로 "SAP 로 재고를 관리했습니다" 가 통과한다.
+# **어딘가에 같은 단어가 있는 것과 그 주장이 참인 것은 다르다.**
+#
+# 출처마다 증명할 수 있는 것이 다르다:
+#   experience  본인의 행동·역할·성과          ← 자기 주장을 증명하는 유일한 출처
+#   company     기업에 관한 사실
+#   job         지원 직무의 요구조건
+#   question    문항에 포함된 표현
+#   glossary    같은 대상을 가리키는 이름 표기  (표기만, 그 활동을 했다는 증거는 아님)
+# ---------------------------------------------------------------------------
+
+class Source(NamedTuple):
+    kind: str
+    text: str
+
+
+SOURCE_PROVES = {
+    'experience': '본인의 행동과 역할, 성과',
+    'company': '기업에 관한 사실',
+    'job': '지원 직무의 요구조건',
+    'question': '문항에 포함된 표현',
+    'glossary': '같은 대상을 가리키는 이름 표기',
+}
+# 본인이 무엇을 했다는 주장을 뒷받침할 수 있는 출처는 이것뿐이다.
+SELF_CLAIM_SOURCES = frozenset({'experience'})
+
+
+def _as_sources(sources) -> List[Source]:
+    """문자열 리스트도 받는다. 유형을 안 밝히면 experience 로 본다 — 기존 호출자의
+    동작을 그대로 두기 위해서다(가장 관대한 쪽)."""
+    out = []
+    for s in sources or []:
+        out.append(s if isinstance(s, Source) else Source('experience', s or ''))
+    return out
+
+
+# 본인이 과거에 한 일을 말하는 문장. 미래 계획과 포부는 사실 주장이 아니므로 뺀다
+# (검토 3-2: "모든 문장이 사실 주장은 아니다").
+# 지각 동사(보았다, 들었다, 알았다)는 뺀다. **무언가를 본 것은 그것을 한 것이 아니다.**
+# 실제 자소서를 돌리다 "퀴네앤드나겔이 2030년까지 ... 밝힌 것을 보았습니다" 가 자기 주장으로
+# 잡혀서 발견했다 — 기업 사실을 기업 것으로 제대로 귀속한 문장인데 오탐이 났다.
+_PAST_SELF_ACTION = re.compile(
+    r'(했|하였|맡았|받았|만들었|썼|배웠|익혔|다뤘|다루었|얻었|냈|이루었|이뤘)습니다')
+_FUTURE_OR_INTENT = re.compile(r'(겠습니다|고 싶습니다|하려 합니다|할 것입니다|예정입니다|싶습니다)')
+
+
+def is_self_claim(sentence: str) -> bool:
+    """이 문장이 '내가 그것을 했다' 는 주장인가. 포부와 계획은 아니다."""
+    if _FUTURE_OR_INTENT.search(sentence):
+        return False
+    return bool(_PAST_SELF_ACTION.search(sentence))
+
+
+# 공고에 적힌 도구·시스템 이름은 ASCII 로 쓰이는 경우가 많다(SAP, WMS, ERP, Excel, SQL).
+# 한국어 일반명사까지 일반적으로 뽑으려면 NER 이 필요하므로 여기서는 손대지 않는다 —
+# 못 잡는 범위를 넓히는 것보다 잡는 범위를 정확히 아는 쪽이 낫다.
+_ASCII_TERM = re.compile(r'[A-Za-z][A-Za-z0-9+#.]{1,19}')
+_TERM_NOISE = frozenset({
+    'and', 'or', 'of', 'in', 'for', 'with', 'to', 'the', 'a', 'an', 'at', 'on', 'by',
+    'is', 'are', 'be', 'as', 'it', 'etc', 'http', 'https', 'www', 'com', 'co', 'kr',
+})
+
+
+def jd_terms(requirements: List[str]) -> List[str]:
+    """공고의 필수·우대조건에서 대조 가능한 도구/시스템 이름을 뽑는다."""
+    seen, out = set(), []
+    for line in requirements or []:
+        for m in _ASCII_TERM.findall(line or ''):
+            key = m.lower().strip('.')
+            if len(key) < 2 or key in _TERM_NOISE or key in seen:
+                continue
+            seen.add(key)
+            out.append(m.strip('.'))
+    return out
+
+
+def check_jd_claims(answer: str, terms: List[str],
+                    experience_texts: List[str]) -> List[str]:
+    """공고에 적힌 도구를 **본인이 써 봤다고 말하면서** 경험 파일에 근거가 없는 경우를 찾는다.
+
+    검토 3-1 의 SAP 예시가 이것이다. 공고에 SAP 가 있다는 사실은 그 직무가 SAP 를
+    요구한다는 것을 증명할 뿐, 지원자가 SAP 를 써 봤다는 것을 증명하지 않는다.
+
+    "입사 후 익히겠습니다" 같은 미래 계획은 주장이 아니므로 통과시킨다.
     """
-    haystack = '\n'.join(sources)
-    hay_numbers = {_normalize_number(n) for n in _NUMBER.findall(haystack)}
-    for parts in _DATE_TOKENS.findall(haystack):
-        hay_numbers.update(p.lstrip('0') or '0' for p in parts if p)
-        hay_numbers.update(p for p in parts if p)
-    hay_text = re.sub(r'\s+', '', haystack)
+    exp = re.sub(r'\s+', '', '\n'.join(experience_texts or [])).lower()
+    found = []
+    for sentence in split_sentences(answer):
+        if not is_self_claim(sentence):
+            continue
+        low = sentence.lower()
+        for term in terms or []:
+            t = term.lower()
+            if t in low and t not in exp and term not in found:
+                found.append(term)
+    return found
+
+
+def _number_pool(text: str) -> set:
+    pool = {_normalize_number(n) for n in _NUMBER.findall(text)}
+    for parts in _DATE_TOKENS.findall(text):
+        pool.update(p.lstrip('0') or '0' for p in parts if p)
+        pool.update(p for p in parts if p)
+    return pool
+
+
+def _pools_by_kind(sources) -> dict:
+    """출처 유형별로 (수치 집합, 공백 제거 텍스트) 를 만든다."""
+    grouped = {}
+    for s in _as_sources(sources):
+        grouped.setdefault(s.kind, []).append(s.text)
+    return {kind: (_number_pool('\n'.join(texts)), re.sub(r'\s+', '', '\n'.join(texts)))
+            for kind, texts in grouped.items()}
+
+
+def find_unverified_facts(answer: str, sources) -> Tuple[List[str], List[str]]:
+    """초안에 나온 수치와 기관명 중 **어떤 출처에도** 없는 것을 찾는다.
+    (미확인 수치, 미확인 기관명). 설계검토 A-1 의 "수치·기관명·역할의 불일치를 탐지".
+
+    sources 는 문자열 리스트여도 되고 Source(kind, text) 리스트여도 된다.
+    출처 유형을 구분해 보려면 find_jd_only_facts 를 함께 쓴다 (S11-18).
+    """
+    pools = _pools_by_kind(sources)
+    hay_numbers = set().union(*(p[0] for p in pools.values())) if pools else set()
+    hay_text = ''.join(p[1] for p in pools.values())
 
     numbers, orgs = [], []
     for raw in _NUMBER.findall(answer):
@@ -538,6 +661,48 @@ def find_unverified_facts(answer: str, sources: List[str]) -> Tuple[List[str], L
         if re.sub(r'\s+', '', org) not in hay_text and org not in orgs:
             orgs.append(org)
     return numbers, orgs
+
+
+def find_jd_only_facts(answer: str, sources) -> List[str]:
+    """**본인이 했다고 말하는 문장**에 쓰였는데, 경험이 아니라 공고나 기업 자료에만
+    근거가 있는 수치와 기관명을 찾는다 (S11-18, 2차 설계검토 3-1).
+
+    find_unverified_facts 는 "어딘가에 있으면 통과" 다. 그 '어딘가' 가 공고일 때가
+    문제다 — 공고는 직무 요구조건을 증명할 뿐 지원자가 그 일을 했다는 증거가 아니다.
+
+    경보지 판정이 아니다. 경험 파일에 없는 표기로 같은 사실을 말했을 수 있다.
+    """
+    pools = _pools_by_kind(sources)
+    own_numbers, own_text = pools.get('experience', (set(), ''))
+    other = [(k, v) for k, v in pools.items() if k not in SELF_CLAIM_SOURCES]
+    if not other:
+        return []
+
+    found = []
+    for sentence in split_sentences(answer):
+        if not is_self_claim(sentence):
+            continue
+        for raw in _NUMBER.findall(sentence):
+            n = _normalize_number(raw)
+            if len(n.replace('.', '')) < 2 or n in own_numbers:
+                continue
+            for kind, (nums, _) in other:
+                if n in nums:
+                    label = f'{n} ({SOURCE_PROVES.get(kind, kind)}에만 있음)'
+                    if label not in found:
+                        found.append(label)
+                    break
+        for org in _ORG_SUFFIX.findall(sentence):
+            flat = re.sub(r'\s+', '', org)
+            if flat in own_text:
+                continue
+            for kind, (_, text) in other:
+                if flat in text:
+                    label = f'{org} ({SOURCE_PROVES.get(kind, kind)}에만 있음)'
+                    if label not in found:
+                        found.append(label)
+                    break
+    return found
 
 
 # 결정적으로 검사할 수 있는 개인 규칙만 등록한다. writing-rules.md 에 그 규칙이 실제로
@@ -937,10 +1102,30 @@ class CoverletterContext:
     reference_texts: List[Tuple[str, str]] = field(default_factory=list)
     trends_text: str = ''
     job_text: str = ''
+    # S11-18: 공고의 필수·우대조건 원문. 여기서 대조할 도구 이름을 뽑는다.
+    job_requirements: List[str] = field(default_factory=list)
     glossary: 'Glossary' = field(default_factory=lambda: Glossary())
 
 
 MAX_REFERENCES = 3  # 레퍼런스는 프롬프트 비용이 커서 상한을 둔다
+
+
+def _job_requirements(job) -> List[str]:
+    """공고의 필수·우대조건을 리스트로 뽑는다. jd_terms 가 여기서 도구 이름을 찾는다."""
+    if not job:
+        return []
+    import json as _json
+    out = []
+    for key in ('required_json', 'preferred_json'):
+        raw = job.get(key)
+        if not raw:
+            continue
+        try:
+            items = _json.loads(raw) if isinstance(raw, str) else list(raw)
+        except (ValueError, TypeError):
+            continue
+        out.extend(str(i) for i in items if i)
+    return out
 
 
 def _job_to_text(job: dict) -> str:
@@ -1004,6 +1189,7 @@ def gather_context(user_root: Path, *, companies_dir: Path, references_dir: Path
         reference_texts=reference_texts,
         trends_text=trends_text,
         job_text=_job_to_text(job) if job else '',
+        job_requirements=_job_requirements(job),
         glossary=load_glossary(user_root),
     )
 
@@ -1229,18 +1415,35 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
 
         # S11-11: 초안에 나온 수치·기관명이 어떤 출처에도 없으면 알린다. **경보지
         # 허위 판정이 아니다** — 단위 환산, 반올림, 파생 수치는 원문에 그대로 없을 수 있다.
-        sources = [txt for _, txt in selected_experiences]
-        sources += [ctx.company_text, ctx.job_text, question]
+        # S11-18: 출처를 유형별로 넘긴다. 예전엔 전부 한 덩어리였고, 그래서 공고에
+        # 적힌 수치가 본인 성과 주장까지 통과시켰다 (2차 설계검토 3-1).
+        sources = [Source('experience', txt) for _, txt in selected_experiences]
+        sources += [Source('company', ctx.company_text), Source('job', ctx.job_text),
+                    Source('question', question)]
         # S11-12 와 맞물린 오탐 방지: glossary 가 "Hanze University of Applied Sciences
         # → 한제대학교" 처럼 풀어 쓰라고 지시한 표현은 경험 원문에 그대로 없다. 사전에
         # 등록된 설명형 표현과 허용 이름은 검증된 것으로 본다.
         # (실제 자소서를 쓰다 '한제대학교' 가 미확인 기관으로 잡혀서 발견했다.)
-        sources += list(ctx.glossary.explain.values()) + list(ctx.glossary.allowed)
+        # glossary 는 **이름 표기만** 증명한다 — 그 활동을 했다는 근거가 아니므로
+        # experience 가 아니라 glossary 유형으로 넣는다.
+        sources += [Source('glossary', g)
+                    for g in list(ctx.glossary.explain.values()) + list(ctx.glossary.allowed)]
         nums, orgs = find_unverified_facts(answer_text, sources)
         if nums:
             found.append(ISSUE_UNKNOWN_NUMBER)
         if orgs:
             found.append(ISSUE_UNKNOWN_ORG)
+
+        # S11-18: 어딘가에는 있지만 **본인 경험에는 없는** 사실
+        jd_only = find_jd_only_facts(answer_text, sources)
+        if jd_only:
+            found.append(ISSUE_FACT_FROM_JD_ONLY)
+        # S11-18: 공고에 적힌 도구를 써 봤다고 말하는데 경험 파일에 근거가 없는 경우
+        unsupported_terms = check_jd_claims(
+            answer_text, jd_terms(ctx.job_requirements),
+            [txt for _, txt in selected_experiences])
+        if unsupported_terms:
+            found.append(ISSUE_JD_TERM_UNSUPPORTED)
 
         # S11-11: 코드로 판정 가능한 개인 규칙(현재는 가운뎃점 금지). 예전엔
         # writing-rules.md 에 적혀 있어도 프롬프트에만 맡겨져 있었다.
@@ -1252,11 +1455,15 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
         unexplained = check_obscure_names(answer_text, ctx.glossary)
         if unexplained:
             found.append(ISSUE_UNEXPLAINED_NAME)
-        return found, n, over, plan_rows, cited_, unknown_, nums, orgs, broken, unexplained
+        return (found, n, over, plan_rows, cited_, unknown_, nums, orgs, broken,
+                unexplained, jd_only, unsupported_terms)
 
     (det, actual, exceeded, plan, cited_experiences, unknown_cited,
-     unverified_numbers, unverified_orgs, broken_rules,
-     unexplained_names) = deterministic_check(result['text'], answer, meta)
+     unverified_numbers, unverified_orgs, broken_rules, unexplained_names,
+     jd_only_facts, jd_terms_unsupported) = deterministic_check(result['text'], answer, meta)
+    if jd_only_facts or jd_terms_unsupported:
+        yield 'progress', {'stage': 'jd_scope', 'facts': jd_only_facts,
+                            'terms': jd_terms_unsupported}
     if unexplained_names:
         yield 'progress', {'stage': 'unexplained_names', 'names': unexplained_names}
     if unverified_numbers or unverified_orgs:
@@ -1310,7 +1517,8 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
                     new_answer, new_meta = parse_answer(repaired['text'])
                     if new_answer:
                         (new_det, n2, over2, plan2, cited2, unknown2,
-                         nums2, orgs2, broken2, unexplained2) = deterministic_check(
+                         nums2, orgs2, broken2, unexplained2,
+                         jd2, terms2) = deterministic_check(
                             repaired['text'], new_answer, new_meta)
                         # 검토 지적을 고치면서 글자수나 사실이 틀어졌다면 수정본을 버린다.
                         worse = set(new_det) - set(det)
@@ -1323,6 +1531,7 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
                             plan, cited_experiences, unknown_cited = plan2, cited2, unknown2
                             unverified_numbers, unverified_orgs = nums2, orgs2
                             broken_rules, unexplained_names = broken2, unexplained2
+                            jd_only_facts, jd_terms_unsupported = jd2, terms2
                     else:
                         yield 'progress', {'stage': 'repair_failed', 'error': 'ANSWER 블록 없음'}
             # 수정 후에도(또는 수정 없이) 남은 차단성 지적은 사람에게 넘긴다.
@@ -1351,6 +1560,7 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
             'used_experiences': supplied_filenames,
             'cited_experiences': cited_experiences,
             'plan': plan, 'review': review, 'review_error': review_error, 'repairs': repairs,
+            'jd_only_facts': jd_only_facts, 'jd_terms_unsupported': jd_terms_unsupported,
             'quality_checked': bool(quality_check and review is not None and not review_error),
             'run_id': None,   # 저장하지 않는 호출이라 실행 기록도 남기지 않는다
         }
@@ -1450,6 +1660,9 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
         'unverified_organizations': unverified_orgs,
         'broken_rules': broken_rules,
         'unexplained_names': unexplained_names,
+        # S11-18: 어딘가에는 있지만 본인 경험에는 근거가 없는 것
+        'jd_only_facts': jd_only_facts,
+        'jd_terms_unsupported': jd_terms_unsupported,
         'review': review,
         'review_error': review_error,
         'repairs': repairs,
@@ -1561,12 +1774,25 @@ def revise_coverletter_events(user, question: str, exp_dir: Path, *,
     _, unknown_cited = validate_cited_experiences(meta, supplied) if supplied else ([], [])
     if unknown_cited:
         issues.append(ISSUE_CITED_UNKNOWN)
-    nums, orgs = find_unverified_facts(
-        answer, [txt for _, txt in allowed_texts] + [ctx.company_text, ctx.job_text, question])
+    # S11-18: 수정 경로도 생성과 같은 기준으로 출처를 유형별로 본다. 처음에 안전했던
+    # 글이 수정하면서 공고 내용을 자기 경험처럼 끌어오는 것을 막는다 (2차 설계검토 4-2).
+    rev_sources = [Source('experience', txt) for _, txt in allowed_texts]
+    rev_sources += [Source('company', ctx.company_text), Source('job', ctx.job_text),
+                    Source('question', question)]
+    rev_sources += [Source('glossary', g)
+                    for g in list(ctx.glossary.explain.values()) + list(ctx.glossary.allowed)]
+    nums, orgs = find_unverified_facts(answer, rev_sources)
     if nums:
         issues.append(ISSUE_UNKNOWN_NUMBER)
     if orgs:
         issues.append(ISSUE_UNKNOWN_ORG)
+    jd_only = find_jd_only_facts(answer, rev_sources)
+    if jd_only:
+        issues.append(ISSUE_FACT_FROM_JD_ONLY)
+    jd_unsupported = check_jd_claims(answer, jd_terms(ctx.job_requirements),
+                                      [txt for _, txt in allowed_texts])
+    if jd_unsupported:
+        issues.append(ISSUE_JD_TERM_UNSUPPORTED)
     broken = check_personal_rules(answer, ctx.rules_text)
     if broken:
         issues.append(ISSUE_FORBIDDEN_CHAR)
@@ -1613,6 +1839,8 @@ def revise_coverletter_events(user, question: str, exp_dir: Path, *,
         'unverified_organizations': orgs,
         'broken_rules': broken,
         'unexplained_names': unexplained,
+        'jd_only_facts': jd_only,
+        'jd_terms_unsupported': jd_unsupported,
         'used_experiences': supplied,
         # 설계검토 C-3: 외부 응답은 항상 전체 본문이다. 발췌만 돌려주지 않는다.
         'full_document': full_document,
