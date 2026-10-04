@@ -37,6 +37,11 @@ _EDUCATION = re.compile(r'특강|교육|스터디|소모임|수강생|교환학�
 _ACTIVITY = re.compile(r'봉사|동아리|학생회|단원|버디|멘토')
 
 _NUMBER = re.compile(r'\d')
+# 숫자만 성과인 것은 아니다. 수상, 논문 등재, 채택, 체결은 숫자가 없어도 **외부가 확인한
+# 구체적 결과**다. 처음엔 숫자만 봤더니 "최우수상(중부발전사장상) 수상" 과 "MOU 체결" 이
+# 정량 성과 없음으로 잡혔다 — 검사 이름이 틀렸던 것이다 (2026-10-04 실사용 중 발견).
+_AWARD = re.compile(r'(수상|대상|최우수상|우수상|장상|입선|등재|게재|채택|선정|체결|'
+                    r'특허|출원|합격|정규 ?프로그램)')
 # 이력서 작성법: "열심히 했다 / 많이 배웠다 / 느낀 점이 많다" 는 일을 잘한다는 증거가 아니다.
 VAGUE_REFLECTION = re.compile(
     r'(열심히|최선을 다|많이 배웠|배울 수 있었|느낀 점|보람|뜻깊|값진 경험|성장할 수 있었|'
@@ -69,7 +74,10 @@ class Entry:
     keywords: List[str] = field(default_factory=list)
     result: str = ''
     section: str = SECTION_ACTIVITY
-    has_number: bool = False
+    # 숫자 또는 수상·등재·채택처럼 외부가 확인한 결과가 Result 에 있는가.
+    has_outcome: bool = False
+    # 메타에 "- 정량성과: 해당없음" 이 있으면 보강 권고를 끈다 (사용자 판단).
+    number_waived: bool = False
     vague: List[str] = field(default_factory=list)
 
 
@@ -86,7 +94,10 @@ _RESULT_BLOCK = re.compile(r'^### Result[^\n]*\n(?P<body>.*?)(?=^## |^### |\Z)',
 _PROFILE_FIELDS = ('이름', '학교/소속', '연락처', '이메일', '생년월일', 'GPA', '목표 직무')
 
 
-_META_LINE = re.compile(r'^- (시기|기관명|역할): (.+)$', re.M)
+_META_LINE = re.compile(r'^- (시기|기관명|역할|정량성과): (.+)$', re.M)
+# 모든 경험에 숫자가 있어야 하는 것은 아니다. 사용자가 "이 경험은 수행 사실 자체가
+# 요점" 이라고 정하면 경고를 끈다 — 지울 수 없는 경고는 노이즈가 된다.
+_NUMBER_WAIVED = re.compile(r'(해당\s*없음|불필요|필요\s*없음|없음)')
 
 
 def _meta(path: Path) -> dict:
@@ -98,7 +109,8 @@ def _meta(path: Path) -> dict:
     text = path.read_text(encoding='utf-8')
     got = {k: v.strip() for k, v in _META_LINE.findall(text)}
     return {'period': got.get('시기', ''), 'org': got.get('기관명', ''),
-            'role': got.get('역할', '')}
+            'role': got.get('역할', ''),
+            'number_waived': bool(_NUMBER_WAIVED.search(got.get('정량성과', '')))}
 
 
 def _result_text(path: Path) -> str:
@@ -130,7 +142,8 @@ def collect(user_root: Path, exp_dir: Path) -> MasterResume:
             filename=exp.filename, title=exp.title, period=meta['period'], org=meta['org'],
             role=meta['role'], keywords=list(exp.keywords), result=result,
             section=classify(exp, meta['role']),
-            has_number=bool(_NUMBER.search(result)),
+            has_outcome=bool(_NUMBER.search(result) or _AWARD.search(result)),
+            number_waived=meta['number_waived'],
             vague=sorted(set(VAGUE_REFLECTION.findall(result))),
         ))
     entries.sort(key=lambda e: e.period, reverse=True)
@@ -146,16 +159,19 @@ def lint(resume: MasterResume) -> List[str]:
         issues.append('no_entries')
     if not resume.by_section(SECTION_EXPERIENCE):
         issues.append('no_work_experience')
-    # 이력서 작성법: 성과는 숫자로 말한다. 없는 항목을 알려 보강하게 한다.
-    if any(not e.has_number for e in resume.entries):
-        issues.append('result_without_number')
+    # 이력서 작성법: 성과 중심으로 쓴다. 숫자든 수상이든 **외부가 확인한 결과**가
+    # 없는 항목을 알려 보강하게 한다.
+    if needs_numbers(resume):
+        issues.append('result_without_outcome')
     if any(e.vague for e in resume.entries):
         issues.append('vague_reflection')
     return issues
 
 
 def needs_numbers(resume: MasterResume) -> List[str]:
-    return [e.filename for e in resume.entries if not e.has_number]
+    """구체적 결과가 안 보이는 항목. 사용자가 "해당없음" 으로 정한 것은 빼고 센다."""
+    return [e.filename for e in resume.entries
+            if not e.has_outcome and not e.number_waived]
 
 
 def vague_entries(resume: MasterResume) -> List[dict]:
@@ -211,8 +227,8 @@ def build_markdown(resume: MasterResume, summary: str = '',
             if e.result:
                 out += ['', e.result]
             flags = []
-            if not e.has_number:
-                flags.append('정량 성과 없음')
+            if not e.has_outcome and not e.number_waived:
+                flags.append('구체적 결과가 안 보임')
             if e.vague:
                 flags.append(f'모호한 표현: {", ".join(e.vague)}')
             if flags:

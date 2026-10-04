@@ -116,7 +116,7 @@ class CollectTest(Fixture, unittest.TestCase):
 class LintTest(Fixture, unittest.TestCase):
     def test_entry_without_numbers_is_flagged(self):
         r = self.collect()
-        self.assertIn('result_without_number', M.lint(r))
+        self.assertIn('result_without_outcome', M.lint(r))
         self.assertIn('2024-봉사.md', M.needs_numbers(r))
 
     def test_entry_with_numbers_is_not_flagged(self):
@@ -174,8 +174,8 @@ class MarkdownTest(Fixture, unittest.TestCase):
     def test_says_it_is_not_for_submission(self):
         self.assertIn('제출용이 아닙니다', self.md())
 
-    def test_marks_entries_that_need_numbers(self):
-        self.assertIn('정량 성과 없음', self.md())
+    def test_marks_entries_that_need_a_concrete_result(self):
+        self.assertIn('구체적 결과가 안 보임', self.md())
 
     def test_every_entry_links_back_to_its_source_file(self):
         md = self.md()
@@ -300,3 +300,45 @@ class MasterResumeRouteTest(unittest.TestCase):
 
     def test_path_traversal_in_name_is_rejected(self):
         self.assertIn(self.c.get('/master-resume/..%2f..%2fetc').status_code, (400, 404))
+
+
+class ConcreteResultTest(Fixture, unittest.TestCase):
+    """실사용 중 발견 (2026-10-04). 숫자만 성과로 보면 "최우수상(중부발전사장상) 수상" 과
+    "MOU 체결" 이 '정량 성과 없음' 으로 잡힌다. 검사 이름이 틀렸던 것이다."""
+
+    def needs(self):
+        return set(M.needs_numbers(self.collect()))
+
+    def test_award_without_digits_counts_as_a_result(self):
+        self.write('2024-수상.md', '경진대회', '팀장', '2024.05',
+                   result='최우수상(중부발전사장상) 수상.')
+        self.assertNotIn('2024-수상.md', self.needs())
+
+    def test_mou_and_paper_count_as_results(self):
+        self.write('2024-협약.md', '프로그램 개발', '담당', '2024.11',
+                   result='한국중부발전과 MOU를 체결하였다. KCI 논문에 제4저자로 등재되었다.')
+        self.assertNotIn('2024-협약.md', self.needs())
+
+    def test_soft_praise_is_still_flagged(self):
+        self.write('2024-평가.md', '멘토링', '기획', '2024.08',
+                   result='가장 긍정적인 평가를 받았다.')
+        self.assertIn('2024-평가.md', self.needs())
+
+    def test_user_can_waive_the_requirement(self):
+        """모든 경험에 결과가 필요한 것은 아니다. 지울 수 없는 경고는 노이즈가 된다."""
+        (self.exp / '2024-면제.md').write_text(
+            EXP.format(title='분석 수행', period='2024.03', org='기관', role='담당',
+                       keywords='분석', result='분석을 수행하고 개선 지점을 제안하였다.')
+            .replace('- 역할: 담당', '- 역할: 담당\n- 정량성과: 해당없음'), encoding='utf-8')
+        self.assertIn('2024-면제.md', {e.filename for e in self.collect().entries})
+        self.assertNotIn('2024-면제.md', self.needs())
+
+    def test_waived_entry_shows_no_warning_in_markdown(self):
+        (self.exp / '2024-면제.md').write_text(
+            EXP.format(title='분석 수행', period='2024.03', org='기관', role='담당',
+                       keywords='분석', result='분석을 수행하였다.')
+            .replace('- 역할: 담당', '- 역할: 담당\n- 정량성과: 해당없음'), encoding='utf-8')
+        md = M.build_markdown(self.collect())
+        self.assertIn('분석 수행', md)
+        section = md[md.index('분석 수행'):]
+        self.assertNotIn('구체적 결과가 안 보임', section.split('출처:')[0])
