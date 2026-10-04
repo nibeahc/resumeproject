@@ -5,8 +5,9 @@
 
 
 def register_blueprints(app):
-    from web.routes import (applications, documents, elicit, generate, jobs, main, matches,
-                            parse, profile, trends)
+    from web.routes import (applications, documents, elicit, generate, jobs, main, master_resume,
+                            matches, parse, profile, trends)
 
-    for module in (main, profile, documents, parse, generate, elicit, jobs, matches, applications, trends):
+    for module in (main, profile, documents, parse, generate, elicit, jobs, matches,
+                   applications, trends, master_resume):
         app.register_blueprint(module.bp)

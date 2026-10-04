@@ -38,6 +38,9 @@ EXPECTED_ROUTES = {
     ('/generate/<name>/bundle', 'POST'),
     # S11-23: 문항을 쓰기 전에 문서 전체 소재를 배분하는 계획 단계
     ('/generate/<name>/plan', 'POST'),
+    # S11-24: 마스터 이력서 — 기업 맞춤 서류 전에 가장 먼저 만드는 문서
+    ('/master-resume/<name>', 'GET'),
+    ('/master-resume/<name>', 'POST'),
     ('/generate/<name>/revise', 'POST'),
     ('/raw-fallback/<name>', 'POST'),
     ('/elicit/<name>', 'GET'),

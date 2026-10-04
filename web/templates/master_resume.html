@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% block title %}마스터 이력서 — {{ user }}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <a href="/user/{{ user }}" class="back-link">← {{ user }}</a>
+  <h1>마스터 이력서</h1>
+</div>
+
+<div class="card">
+  <p style="font-size:13px; color:#6e6e73; margin:0 0 10px;">
+    모든 경력과 프로젝트, 교육을 한곳에 모은 문서입니다. <b>제출용이 아닙니다.</b>
+    지원할 때마다 공고에 맞는 항목만 발췌해서 씁니다.
+    기업 맞춤 서류를 쓰기 전에 가장 먼저 만들어 두세요.
+  </p>
+  <p style="font-size:13px; margin:0 0 12px;">경험 파일 {{ entry_count }}건에서 조립합니다.</p>
+  <button type="button" class="btn btn-primary" id="buildBtn" onclick="buildMaster(false)"
+          {% if entry_count == 0 %}disabled{% endif %}>미리보기 만들기 →</button>
+  <button type="button" class="btn btn-secondary" id="saveBtn" onclick="buildMaster(true)"
+          style="display:none;">이대로 저장</button>
+  <span id="masterSpinner" class="spinner" style="display:none;"></span>
+</div>
+
+<div class="card" id="masterSummary" style="display:none;">
+  <h2 style="margin-bottom:8px;">요약</h2>
+  <div id="masterKeywords" style="font-weight:600; margin-bottom:6px;"></div>
+  <div id="masterIssues" class="warn-card" style="display:none;"></div>
+  <div id="masterCounts" style="font-size:13px; color:#6e6e73; margin-top:8px;"></div>
+</div>
+
+<div class="card" id="masterBox" style="display:none;">
+  <h2 style="margin-bottom:8px;">본문</h2>
+  <pre id="masterText" style="white-space:pre-wrap; font-size:13px; line-height:1.6;"></pre>
+</div>
+
+{% if existing %}
+<div class="card">
+  <h2 style="margin-bottom:8px;">저장된 마스터 이력서</h2>
+  <pre style="white-space:pre-wrap; font-size:13px; line-height:1.6;">{{ existing }}</pre>
+</div>
+{% endif %}
+
+<script>
+const MASTER_LABELS = {
+  profile_empty: 'profile.md 의 기본 정보가 비어 있음',
+  no_entries: '경험 파일이 없음',
+  no_work_experience: '경력 칸에 들어갈 항목이 없음',
+  result_without_number: '정량 성과가 없는 항목이 있음 (숫자로 말할수록 강해집니다)',
+  vague_reflection: '"많이 배웠다 / 보람찼다" 류의 감상 표현이 있음',
+  summary_no_keywords: '브랜딩 키워드를 받지 못함',
+  summary_keyword_count: '브랜딩 키워드는 2~3개가 적당함',
+  summary_missing: '요약을 받지 못함',
+  summary_line_count: '요약은 3~5줄이 적당함',
+  summary_vague: '요약에 감상 표현이 있음',
+  summary_call_failed: '요약 생성에 실패함 (항목 조립본은 그대로 쓸 수 있습니다)',
+};
+
+async function buildMaster(write) {
+  const btn = document.getElementById('buildBtn');
+  const save = document.getElementById('saveBtn');
+  btn.disabled = true; save.disabled = true;
+  document.getElementById('masterSpinner').style.display = '';
+  try {
+    const res = await fetch('/master-resume/{{ user }}', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ write: write }),
+    });
+    await consumeSSE(res, function (event, data) {
+      if (event === 'error') { toast(data.message || '생성에 실패했습니다.'); return; }
+      if (event === 'done') renderMaster(data, write);
+    });
+  } catch (e) {
+    toast('생성 중 오류가 발생했습니다.');
+  } finally {
+    btn.disabled = false; save.disabled = false;
+    document.getElementById('masterSpinner').style.display = 'none';
+  }
+}
+
+function renderMaster(data, written) {
+  document.getElementById('masterSummary').style.display = '';
+  document.getElementById('masterBox').style.display = '';
+  document.getElementById('saveBtn').style.display = written ? 'none' : '';
+  document.getElementById('masterKeywords').textContent =
+    (data.keywords || []).join(' · ') || '(키워드 없음)';
+  document.getElementById('masterText').textContent = data.markdown || '';
+
+  const s = data.sections || {};
+  document.getElementById('masterCounts').textContent =
+    '항목 ' + data.entries + '건 — 경력 ' + (s.experience || 0)
+    + ' / 프로젝트 ' + (s.project || 0) + ' / 대외활동 ' + (s.activity || 0)
+    + ' / 교육 ' + (s.education || 0)
+    + (data.needs_numbers && data.needs_numbers.length
+        ? ' · 정량 성과 보강 권장 ' + data.needs_numbers.length + '건' : '');
+
+  const box = document.getElementById('masterIssues');
+  const issues = data.issues || [];
+  if (issues.length) {
+    box.style.display = '';
+    box.textContent = '⚠️ ' + issues.map(function (c) {
+      return MASTER_LABELS[c] || c;
+    }).join(' / ');
+  } else {
+    box.style.display = 'none';
+  }
+  if (written) toast('users/{{ user }}/마스터이력서.md 에 저장했습니다.');
+}
+</script>
+{% endblock %}

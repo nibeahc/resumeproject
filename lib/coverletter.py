@@ -167,6 +167,9 @@ SEVERITY_OPTIONAL = 'optional'
 SEVERITIES = (SEVERITY_MUST_FIX, SEVERITY_BETTER, SEVERITY_OPTIONAL)
 # S11-21: 기업 고유 사실이 하나도 없는 지원 동기 (회사명만 바꾸면 다른 회사에 내도 되는 글)
 ISSUE_GENERIC_MOTIVE = 'generic_motivation'
+# S11-25: 자소서는 설득하는 글이다. "열심히 했다 / 보람찼다 / 값진 경험" 은 일을 잘한다는
+# 증거가 아니라 감상이다 (공유받은 이력서 작성법).
+ISSUE_CLICHE_EXPRESSION = 'cliche_expression'
 # S11-22: 문서 전체 배분 (공유받은 프롬프트 2). 문항 단위로는 안 보이는 문제들이다.
 ISSUE_DOCPLAN_MISSING = 'docplan_missing'
 ISSUE_DOCPLAN_QUESTION_MISMATCH = 'docplan_question_mismatch'
@@ -786,6 +789,21 @@ CHECKABLE_RULES = [
         'label': '가운뎃점(·)',
     },
 ]
+
+
+# 자소서에서 걸러낼 감상 표현. lib/master_resume.VAGUE_REFLECTION 보다 **좁다** —
+# 자소서에는 "배운 점" 을 묻는 문항이 실제로 있어서 '배웠' 을 넣으면 오탐이 된다.
+# 이력서에는 그 문항이 없으므로 거기서는 넓게 잡는다.
+_CLICHE = re.compile(r'(열심히|최선을 다|보람|뜻깊|값진 경험|좋은 경험이었|소중한 경험|'
+                     r'많은 것을 느[꼈끼]|느낀 점이 많)')
+
+
+def check_cliche(answer: str) -> List[str]:
+    """일을 잘한다는 증거가 아니라 감상에 가까운 표현을 찾는다 (S11-25).
+
+    경보지 금지가 아니다. 문맥에 따라 맞는 자리도 있다 — 사람이 판단한다.
+    """
+    return sorted(set(_CLICHE.findall(answer or '')))
 
 
 def check_personal_rules(answer: str, rules_text: str) -> List[str]:
@@ -1800,13 +1818,20 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
         unexplained = check_obscure_names(answer_text, ctx.glossary)
         if unexplained:
             found.append(ISSUE_UNEXPLAINED_NAME)
+
+        # S11-25: 감상 표현. 자소서는 "열심히 했다" 가 아니라 "무엇을 했고 어떻게 했고
+        # 결과가 어땠는지" 를 보여주는 글이다.
+        cliches = check_cliche(answer_text)
+        if cliches:
+            found.append(ISSUE_CLICHE_EXPRESSION)
         return (found, n, over, plan_rows, cited_, unknown_, nums, orgs, broken,
-                unexplained, jd_only, unsupported_terms, ev_report, company_terms)
+                unexplained, jd_only, unsupported_terms, ev_report, company_terms,
+                cliches)
 
     (det, actual, exceeded, plan, cited_experiences, unknown_cited,
      unverified_numbers, unverified_orgs, broken_rules, unexplained_names,
      jd_only_facts, jd_terms_unsupported,
-     evidence, company_terms) = deterministic_check(result['text'], answer, meta)
+     evidence, company_terms, cliches) = deterministic_check(result['text'], answer, meta)
     if jd_only_facts or jd_terms_unsupported:
         yield 'progress', {'stage': 'jd_scope', 'facts': jd_only_facts,
                             'terms': jd_terms_unsupported}
@@ -1864,7 +1889,7 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
                     if new_answer:
                         (new_det, n2, over2, plan2, cited2, unknown2,
                          nums2, orgs2, broken2, unexplained2,
-                         jd2, terms2, ev2, ct2) = deterministic_check(
+                         jd2, terms2, ev2, ct2, cl2) = deterministic_check(
                             repaired['text'], new_answer, new_meta)
                         # 검토 지적을 고치면서 글자수나 사실이 틀어졌다면 수정본을 버린다.
                         worse = set(new_det) - set(det)
@@ -1878,7 +1903,7 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
                             unverified_numbers, unverified_orgs = nums2, orgs2
                             broken_rules, unexplained_names = broken2, unexplained2
                             jd_only_facts, jd_terms_unsupported = jd2, terms2
-                            evidence, company_terms = ev2, ct2
+                            evidence, company_terms, cliches = ev2, ct2, cl2
                     else:
                         yield 'progress', {'stage': 'repair_failed', 'error': 'ANSWER 블록 없음'}
             # 수정 후에도(또는 수정 없이) 남은 차단성 지적은 사람에게 넘긴다.
@@ -1908,7 +1933,7 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
             'cited_experiences': cited_experiences,
             'plan': plan, 'review': review, 'review_error': review_error, 'repairs': repairs,
             'jd_only_facts': jd_only_facts, 'jd_terms_unsupported': jd_terms_unsupported,
-            'evidence': evidence, 'company_terms': company_terms,
+            'evidence': evidence, 'company_terms': company_terms, 'cliches': cliches,
             'review_severity': issues_by_severity(review),
             'quality_checked': bool(quality_check and review is not None and not review_error),
             'run_id': None,   # 저장하지 않는 호출이라 실행 기록도 남기지 않는다
@@ -2019,6 +2044,7 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
         'evidence': evidence,
         # S11-21: 이 글이 쓴 기업 고유 표현. 비면 범용 글이라는 신호다.
         'company_terms': company_terms,
+        'cliches': cliches,
         'review_severity': issues_by_severity(review),
         'review': review,
         'review_error': review_error,

@@ -101,3 +101,24 @@ class CompanySpecificityTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ClicheTest(unittest.TestCase):
+    """S11-25. 자소서는 설득하는 글이다 — "열심히 했다" 는 일을 잘한다는 증거가 아니다."""
+
+    def test_catches_filler_sentiment(self):
+        self.assertEqual(C.check_cliche('열심히 노력하여 보람찼습니다.'), ['보람', '열심히'])
+
+    def test_learning_is_not_flagged_in_a_cover_letter(self):
+        """자소서에는 "배운 점" 을 묻는 문항이 실제로 있다. 이력서(master_resume)와 달리
+        여기서 '배웠' 을 잡으면 오탐이 된다."""
+        self.assertEqual(C.check_cliche('그 과정에서 배운 것은 순서였습니다.'), [])
+
+    def test_concrete_writing_passes(self):
+        self.assertEqual(
+            C.check_cliche('수기 입력 단계를 없애 별도 정리 없이 확인할 수 있게 했습니다.'), [])
+
+    def test_master_resume_lint_is_wider(self):
+        from lib import master_resume as M
+        self.assertTrue(M.VAGUE_REFLECTION.search('많이 배웠습니다'))
+        self.assertEqual(C.check_cliche('많이 배웠습니다'), [])

@@ -248,3 +248,55 @@ class EventsTest(Fixture, unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class MasterResumeRouteTest(unittest.TestCase):
+    """S11-24: 화면 경로. 미리보기는 파일을 쓰지 않는다 — 사람이 보고 저장을 누른다."""
+
+    def setUp(self):
+        from web import create_app
+        self.tmp = Path(tempfile.mkdtemp())
+        self.root = self.tmp / 'root'
+        u = self.root / 'users' / '홍길동'
+        (u / 'experiences').mkdir(parents=True)
+        (u / 'experiences' / '2026-인턴.md').write_text(
+            EXP.format(title='물류 인턴', period='2026.01', org='기관', role='인턴',
+                       keywords='물류', result='120건을 처리하였다.'), encoding='utf-8')
+        (u / 'profile.md').write_text('# 프로필\n\n- 이름: 홍길동\n', encoding='utf-8')
+        self.user_root = u
+        app = create_app({'PROJECT_ROOT': self.root, 'DB_PATH': self.tmp / 'app.db',
+                           'TESTING': True})
+        self.c = app.test_client()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_page_shows_entry_count(self):
+        body = self.c.get('/master-resume/홍길동').get_data(as_text=True)
+        self.assertIn('마스터 이력서', body)
+        self.assertIn('경험 파일 1건', body)
+
+    def test_page_says_it_is_not_for_submission(self):
+        self.assertIn('제출용이 아닙니다',
+                      self.c.get('/master-resume/홍길동').get_data(as_text=True))
+
+    def test_preview_does_not_write_the_file(self):
+        from unittest.mock import patch
+        import web.routes.master_resume as route
+        with patch.object(route, 'stream_complete', return_value={'text': summary_text()}):
+            body = self.c.post('/master-resume/홍길동', json={'write': False}).get_data(as_text=True)
+        self.assertIn('event: done', body)
+        self.assertFalse((self.user_root / M.MASTER_FILENAME).exists())
+
+    def test_save_writes_the_file(self):
+        from unittest.mock import patch
+        import web.routes.master_resume as route
+        with patch.object(route, 'stream_complete', return_value={'text': summary_text()}):
+            # SSE 응답은 **본문을 읽어야** 제너레이터가 돈다. 안 읽으면 아무 일도 안 일어난다.
+            self.c.post('/master-resume/홍길동', json={'write': True}).get_data()
+        saved = (self.user_root / M.MASTER_FILENAME).read_text(encoding='utf-8')
+        self.assertIn('경력 및 업무 경험', saved)
+        self.assertIn('물류 인턴', saved)
+
+    def test_path_traversal_in_name_is_rejected(self):
+        self.assertIn(self.c.get('/master-resume/..%2f..%2fetc').status_code, (400, 404))
