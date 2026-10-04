@@ -24,7 +24,7 @@ from lib import versions
 from lib.llm import stream_complete
 from lib.resume import _safe_folder_name
 from lib import runs
-from lib.selector import MAX_EXPERIENCES
+from lib.selector import (MAX_EXPERIENCES, load_all_experiences, rank_experiences)
 from lib.selector import select as select_experiences
 from lib.skills import ContractError, load_frontmatter, load_skill
 
@@ -34,6 +34,8 @@ _REVIEW_BLOCK = re.compile(r'===REVIEW===\n(?P<body>.*?)\n===END===', re.S)
 _ANSWER_BLOCK = re.compile(r'===ANSWER===\n(?P<body>.*?)\n===END===', re.S)
 _META_BLOCK = re.compile(r'===META===\n(?P<body>.*?)\n===END===', re.S)
 _EVIDENCE_BLOCK = re.compile(r'===EVIDENCE===\n(?P<body>.*?)\n===END===', re.S)
+_DOCPLAN_BLOCK = re.compile(r'===DOCPLAN===\n(?P<body>.*?)\n===END===', re.S)
+_POSITIONING_BLOCK = re.compile(r'===POSITIONING===\n(?P<body>.*?)\n===END===', re.S)
 
 # ---------------------------------------------------------------------------
 # 정책 (S11-15, 설계검토 A-3)
@@ -165,6 +167,15 @@ SEVERITY_OPTIONAL = 'optional'
 SEVERITIES = (SEVERITY_MUST_FIX, SEVERITY_BETTER, SEVERITY_OPTIONAL)
 # S11-21: 기업 고유 사실이 하나도 없는 지원 동기 (회사명만 바꾸면 다른 회사에 내도 되는 글)
 ISSUE_GENERIC_MOTIVE = 'generic_motivation'
+# S11-22: 문서 전체 배분 (공유받은 프롬프트 2). 문항 단위로는 안 보이는 문제들이다.
+ISSUE_DOCPLAN_MISSING = 'docplan_missing'
+ISSUE_DOCPLAN_QUESTION_MISMATCH = 'docplan_question_mismatch'
+ISSUE_DOCPLAN_UNKNOWN_EXPERIENCE = 'docplan_unknown_experience'
+ISSUE_DOCPLAN_EXPERIENCE_OVERUSED = 'docplan_experience_overused'
+ISSUE_DOCPLAN_SAME_STRENGTH = 'docplan_same_strength'
+ISSUE_DOCPLAN_NO_MESSAGE = 'docplan_no_message'
+ISSUE_DOCPLAN_UNIFORM_FLOW = 'docplan_uniform_flow'
+ISSUE_DOCPLAN_NO_POSITIONING = 'docplan_no_positioning'
 
 BLOCKING_REVIEW_KINDS = frozenset({ISSUE_UNSUPPORTED_CLAIM, ISSUE_NEW_UNRELATED_CLAIM,
                                     ISSUE_FABRICATED_FACT})
@@ -1052,6 +1063,99 @@ def lint_plan(plan: List[dict], supplied_filenames) -> List[str]:
         roles = ' '.join(row['second_role'] for row in plan).strip(' -')
         if len(used) > 1 and not roles:
             issues.append(ISSUE_SECOND_EXPERIENCE_UNJUSTIFIED)
+    return issues
+
+
+def build_document_plan_prompt(questions: List[dict], ctx: 'CoverletterContext',
+                                candidates: List[dict]) -> str:
+    """문서 전체 배분 계획을 요청하는 프롬프트 (S11-22, 공유받은 작성 프롬프트 2).
+
+    questions 는 [{'id': 'q1', 'text': 문항, 'limit': 글자수 또는 None}] 꼴이다.
+    candidates 는 선택기가 매긴 후보 [{'filename','title','keywords','jd_matched'}].
+    """
+    q_lines = '\n'.join(
+        f"- {q['id']} | {q['text']} | " + (f"{q['limit']}자" if q.get('limit') else '글자수 제한 없음')
+        for q in questions)
+    cand_lines = '\n'.join(
+        f"- {c['filename']} | {c.get('title', '')} | 키워드: {', '.join(c.get('keywords') or [])}"
+        + (f" | 공고와 겹침: {', '.join(c['jd_matched'])}" if c.get('jd_matched') else '')
+        for c in candidates)
+    parts = [f'[문항 목록]\n{q_lines}', f'[쓸 수 있는 경험]\n{cand_lines}']
+    if ctx.job_text.strip():
+        parts.append(f'[지원 공고]\n{ctx.job_text.strip()}')
+    if ctx.company_text.strip():
+        parts.append(f'[기업 자료]\n{ctx.company_text.strip()}')
+    if ctx.interest_text.strip():
+        parts.append(f'[관심 직무]\n{ctx.interest_text.strip()}')
+    parts.append('위 재료로 문서 전체 배분 계획을 세우세요. 완성된 자소서는 쓰지 마세요.')
+    return '\n\n'.join(parts)
+
+
+def parse_document_plan(text: str) -> Tuple[List[dict], str]:
+    """(문항별 배분, 전체 포지셔닝 한 문장). 형식을 안 지켜도 예외를 내지 않는다."""
+    rows = []
+    m = _DOCPLAN_BLOCK.search(text or '')
+    if m:
+        for line in m.group('body').split('\n'):
+            line = line.strip()
+            if not line or line.startswith('(') or line.startswith('예시'):
+                continue
+            cells = [c.strip() for c in line.split('|')]
+            if len(cells) < 5 or cells[0].startswith('문항id'):
+                continue
+
+            def cell(i):
+                v = cells[i].strip() if len(cells) > i else ''
+                return '' if v in ('-', '—', 'N/A') else v
+
+            rows.append({'id': cells[0], 'checks': cell(1),
+                          'experiences': _MD_FILENAME.findall(cell(2)),
+                          'strength': cell(3), 'message': cell(4), 'flow': cell(5)})
+    pm = _POSITIONING_BLOCK.search(text or '')
+    positioning = pm.group('body').strip() if pm else ''
+    return rows, positioning
+
+
+def lint_document_plan(rows: List[dict], positioning: str, question_ids,
+                        supplied_filenames) -> List[str]:
+    """문서 수준 결정적 린터 (S11-22).
+
+    **문항 하나만 보면 전부 타당한데 문서로 보면 틀린 것들**을 잡는다. 실제로 이
+    프로젝트에서 한 지원서의 네 문항 중 세 곳에 같은 인턴십이 들어간 적이 있다.
+    """
+    issues = []
+    if not rows:
+        return [ISSUE_DOCPLAN_MISSING]
+    expected = list(question_ids)
+    if [r['id'] for r in rows] != expected:
+        issues.append(ISSUE_DOCPLAN_QUESTION_MISMATCH)
+
+    supplied = set(supplied_filenames)
+    used = [fn for r in rows for fn in r['experiences']]
+    if supplied and any(fn not in supplied for fn in used):
+        issues.append(ISSUE_DOCPLAN_UNKNOWN_EXPERIENCE)
+
+    # 과반 문항에 같은 경험이 들어가면 문서가 한 경험에 기대고 있다는 뜻이다.
+    # 두 문항에 쓰는 것 자체는 금지가 아니다 — 서로 다른 사실을 쓰면 유효하다.
+    if rows:
+        half = len(rows) / 2
+        counts = {fn: sum(1 for r in rows if fn in r['experiences']) for fn in set(used)}
+        if any(n > half for n in counts.values()):
+            issues.append(ISSUE_DOCPLAN_EXPERIENCE_OVERUSED)
+
+    strengths = [r['strength'] for r in rows if r['strength']]
+    if len(rows) > 1 and strengths and len(set(strengths)) == 1:
+        issues.append(ISSUE_DOCPLAN_SAME_STRENGTH)
+
+    if any(not r['message'] for r in rows):
+        issues.append(ISSUE_DOCPLAN_NO_MESSAGE)
+
+    flows = [r['flow'] for r in rows if r['flow']]
+    if len(rows) > 2 and flows and len(set(flows)) == 1:
+        issues.append(ISSUE_DOCPLAN_UNIFORM_FLOW)
+
+    if not positioning:
+        issues.append(ISSUE_DOCPLAN_NO_POSITIONING)
     return issues
 
 
@@ -2103,4 +2207,73 @@ def revise_coverletter_events(user, question: str, exp_dir: Path, *,
         # 수정 경로는 결정적 검사만 돈다. 의미 평가는 돌지 않았다는 사실을 숨기지 않는다.
         'quality_checked': False,
         'run_id': run_id,
+    }
+
+
+def plan_document_events(user, questions: List[dict], exp_dir: Path, *,
+                          company: str, position: str,
+                          context: 'CoverletterContext',
+                          db_path=None, surface: str = 'script', complete=None):
+    """문항을 쓰기 **전에** 문서 전체 소재 배분을 세운다 (S11-22, 공유받은 프롬프트 2).
+
+    문항별 생성(generate_coverletter_events)은 한 문항만 본다. 그래서 문항마다는 최선인데
+    문서 전체로는 같은 경험이 반복되고 같은 역량만 강조되는 글이 나온다. 그 문제는
+    문장을 고쳐서 풀 수 없고 배분 단계에서만 풀린다.
+
+    LLM 호출은 **문서당 1회**다 (문항당이 아니다). 결과의 experiences 를
+    generate_coverletter_events 의 override_filenames 로 그대로 넘길 수 있다.
+    """
+    complete = complete or stream_complete
+    ctx = context
+    if not questions:
+        yield 'error', {'message': '문항이 없습니다.'}
+        return
+
+    # 후보는 공고를 반영해 매긴다 (S11-20). 어느 경험이 왜 후보인지 계획 단계에서 보여준다.
+    experiences = load_all_experiences(exp_dir)
+    _, ranked = rank_experiences(questions[0]['text'], experiences,
+                                  interest_text=ctx.interest_text, job_text=ctx.job_text)
+    candidates = [{'filename': c.experience.filename, 'title': c.experience.title,
+                   'keywords': c.experience.keywords, 'jd_matched': c.jd_matched,
+                   'score': c.score} for c in ranked]
+    yield 'progress', {'stage': 'candidates', 'count': len(candidates),
+                       'top': [c['filename'] for c in candidates[:5]]}
+
+    prompt = build_document_plan_prompt(questions, ctx, candidates)
+    try:
+        result = complete(system=load_skill('plan-document'),
+                          messages=[{'role': 'user', 'content': prompt}],
+                          max_tokens=3000, on_delta=None)
+    except Exception as e:  # noqa: BLE001
+        yield 'error', {'message': f'LLM 호출 실패: {e}'}
+        return
+
+    rows, positioning = parse_document_plan(result['text'])
+    issues = lint_document_plan(rows, positioning, [q['id'] for q in questions],
+                                 {c['filename'] for c in candidates})
+
+    run_id = runs.new_run_id()
+    try:
+        runs.record(runs.RunRecord(
+            run_id=run_id, user=user, surface=surface, workflow='coverletter.plan_document',
+            company=company, position=position,
+            question=' / '.join(q['text'][:20] for q in questions),
+            content_hash=runs.content_hash(result['text']),
+            status=STATUS_REVIEW_REQUIRED if issues else STATUS_READY,
+            issues=list(issues), quality_check=False, reviewed=False,
+            inputs={'questions': [q['id'] for q in questions],
+                    'assigned': {r['id']: r['experiences'] for r in rows}},
+        ), db_path=db_path)
+    except Exception as e:  # noqa: BLE001
+        yield 'progress', {'stage': 'run_record_failed', 'error': str(e)}
+
+    yield 'done', {
+        'plan': rows,
+        'positioning': positioning,
+        'issues': issues,
+        'status': STATUS_REVIEW_REQUIRED if issues else STATUS_READY,
+        'candidates': candidates,
+        'run_id': run_id,
+        # 이 값을 generate_coverletter_events 의 override_filenames 로 그대로 쓸 수 있다.
+        'assignments': {r['id']: r['experiences'] for r in rows},
     }

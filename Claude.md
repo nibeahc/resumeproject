@@ -40,6 +40,7 @@ outputs/[이름]/     ← 사용자별 생성 결과물
 
 - parse-experiences            : users/[이름]/raw/ → users/[이름]/experiences/ 변환 및 태깅
 - elicit-experiences           : raw 파일 없이 대화로 경험 발굴 (콜드 스타트)
+- plan-document                : 문항을 쓰기 **전에** 문서 전체 소재 배분 (S11-22)
 - write-coverletter            : 자소서 문항 → 문단 작성 (기업 리서치 + 레퍼런스 자동 참조)
 - review-coverletter           : 작성된 초안의 문장별 역할·근거 검토 (S11-10, 별도 호출)
 - write-resume                 : 공고 필수조건 순서로 경험 재배치 (창작 아님)
