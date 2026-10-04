@@ -1,3 +1,39 @@
+---
+# 기계 판독 계약 (S11-15, 설계검토 A-3)
+# 아래 숫자와 필수조건의 **원본은 이 블록**이다. lib/coverletter.py 가 읽어
+# 검증 설정을 만든다. 코드와 본문에 같은 값을 각각 손으로 적지 않는다.
+# 본문(아래 ---  다음)만 프롬프트로 모델에게 전달된다.
+contract_version: 1
+workflow: coverletter
+
+preconditions:
+  # 기업 근거 없이 생성할 수 있는가. required 면 사용자 동의 없이는 멈춘다
+  company_evidence: required
+
+experience_policy:
+  default_count: 1
+  max_count: 2
+  # 두 번째 경험은 같은 주장을 보강/대조/변화로 받칠 때만. 근거를 못 적으면 린터가 잡는다
+  second_experience_requires_shared_claim: true
+
+company_evidence_policy:
+  # 확인일이 이보다 오래되면 알린다 (막지는 않는다)
+  max_age_days: 90
+  require_source_url: true
+
+length_policy:
+  max_chars: 10000
+  # 목표 대비 이 비율 이상 모자라면 다시 쓰게 한다
+  tolerance_pct: 5
+
+retry_policy:
+  max_length_retries: 1
+  max_repair_rounds: 1
+
+revision_policy:
+  return_full_document: true
+---
+
 # Skill: write-coverletter
 
 ## 목적

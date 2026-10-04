@@ -25,7 +25,7 @@ from lib.llm import stream_complete
 from lib.resume import _safe_folder_name
 from lib.selector import MAX_EXPERIENCES
 from lib.selector import select as select_experiences
-from lib.skills import load_skill
+from lib.skills import ContractError, load_frontmatter, load_skill
 
 
 _PLAN_BLOCK = re.compile(r'===PLAN===\n(?P<body>.*?)\n===END===', re.S)
@@ -33,12 +33,78 @@ _REVIEW_BLOCK = re.compile(r'===REVIEW===\n(?P<body>.*?)\n===END===', re.S)
 _ANSWER_BLOCK = re.compile(r'===ANSWER===\n(?P<body>.*?)\n===END===', re.S)
 _META_BLOCK = re.compile(r'===META===\n(?P<body>.*?)\n===END===', re.S)
 
-MAX_RETRIES = 1  # ROADMAP: 초과 시 재시도 1회
+# ---------------------------------------------------------------------------
+# 정책 (S11-15, 설계검토 A-3)
+#
+# 숫자와 필수조건의 **원본은 skills/write-coverletter.md 의 frontmatter** 다.
+# 예전에는 같은 값이 코드와 절차서에 각각 적혀 있었고, 한쪽만 고치면 조용히 어긋났다
+# (실제로 "최대 2개" 가 스킬·selector·UI 세 곳에 흩어져 있었다).
+#
+# 계약을 못 읽으면 기본값으로 넘어가지 않고 **import 가 실패한다.** 기본값으로 돌아가면
+# 스킬 파일에 적힌 정책이 지켜지는 줄 알게 되는데, 그게 검토가 경고한 상황이다.
+# ---------------------------------------------------------------------------
 
-# 매직넘버를 한곳에 모은다 (S11-5). 각 값의 근거는 PROGRESS.md 의 S1-1~S1-3 실측 기록이다.
-LENGTH_TOLERANCE = 0.05   # 목표 대비 이만큼 모자라면 다시 시킨다 (스킬 Step 9: 여유 있게 짧게 쓰기 금지)
+SUPPORTED_CONTRACT_VERSION = 1
+
+# 허용 필드와 타입. 여기 없는 키가 계약에 있으면 오류다 — 오타난 정책이 조용히
+# 무시되는 것을 막는다.
+_CONTRACT_SCHEMA = {
+    'contract_version': int,
+    'workflow': str,
+    'preconditions': {'company_evidence': str},
+    'experience_policy': {'default_count': int, 'max_count': int,
+                           'second_experience_requires_shared_claim': bool},
+    'company_evidence_policy': {'max_age_days': int, 'require_source_url': bool},
+    'length_policy': {'max_chars': int, 'tolerance_pct': int},
+    'retry_policy': {'max_length_retries': int, 'max_repair_rounds': int},
+    'revision_policy': {'return_full_document': bool},
+}
+
+
+def validate_contract(data: dict) -> dict:
+    """허용 필드와 타입을 검사한다. 알 수 없는 키나 지원하지 않는 버전은 오류."""
+    version = data.get('contract_version')
+    if version != SUPPORTED_CONTRACT_VERSION:
+        raise ContractError(
+            f'지원하지 않는 contract_version: {version!r} '
+            f'(이 코드는 {SUPPORTED_CONTRACT_VERSION} 만 압니다)')
+    for key, value in data.items():
+        if key not in _CONTRACT_SCHEMA:
+            raise ContractError(f'알 수 없는 계약 항목: {key!r}')
+        expected = _CONTRACT_SCHEMA[key]
+        if isinstance(expected, dict):
+            if not isinstance(value, dict):
+                raise ContractError(f'{key}: 하위 항목이 있어야 합니다')
+            for sub_key, sub_value in value.items():
+                if sub_key not in expected:
+                    raise ContractError(f'알 수 없는 계약 항목: {key}.{sub_key}')
+                if not isinstance(sub_value, expected[sub_key]) or isinstance(sub_value, bool) != (
+                        expected[sub_key] is bool):
+                    raise ContractError(
+                        f'{key}.{sub_key}: {expected[sub_key].__name__} 이어야 합니다 (받은 값 {sub_value!r})')
+        elif not isinstance(value, expected) or isinstance(value, bool) != (expected is bool):
+            raise ContractError(f'{key}: {expected.__name__} 이어야 합니다 (받은 값 {value!r})')
+    return data
+
+
+def load_policy(skill: str = 'write-coverletter') -> dict:
+    return validate_contract(load_frontmatter(skill))
+
+
+POLICY = load_policy()
+
+# 아래 이름들은 계약에서 파생된다. 호출부가 계속 쓸 수 있게 모듈 상수로 노출하되,
+# 값을 바꾸려면 skills/write-coverletter.md 를 고친다.
+MAX_RETRIES = POLICY['retry_policy']['max_length_retries']
+MAX_REPAIRS = POLICY['retry_policy']['max_repair_rounds']
+MAX_CHAR_LIMIT = POLICY['length_policy']['max_chars']
+LENGTH_TOLERANCE = POLICY['length_policy']['tolerance_pct'] / 100
+COMPANY_EVIDENCE_MAX_AGE_DAYS = POLICY['company_evidence_policy']['max_age_days']
+COMPANY_EVIDENCE_REQUIRED = POLICY['preconditions']['company_evidence'] == 'required'
+MAX_EXPERIENCES_BY_CONTRACT = POLICY['experience_policy']['max_count']
+
+# 계약에 넣지 않은 값: 구현 세부사항이라 정책이 아니다.
 TARGET_UNDERSHOOT = 20    # 재시도 목표를 상한에 붙이지 않고 이만큼 아래로 둔다 (미세 오차 대비)
-MAX_CHAR_LIMIT = 10000    # 상한의 상한. 모델 max_tokens=3000 과 모순되는 값을 막는다
 
 # S11-4: "저장했다" 와 "제출해도 된다" 를 분리한다. 이 둘을 같은 값으로 묶어두면
 # (예전의 done → coverletter_ok=True) 글자수를 초과한 초안도 성공으로 보고된다.
@@ -70,13 +136,13 @@ ISSUE_UNEXPLAINED_NAME = 'unexplained_name'   # S11-12
 ISSUE_SECTION_NOT_FOUND = 'section_not_found'  # S11-13
 ISSUE_PLAN_MISSING_WARRANT = 'plan_missing_warrant'  # S11-14
 
-COMPANY_EVIDENCE_MAX_AGE_DAYS = 90   # skills/write-coverletter.md Step 2 의 "90일" 을 코드로 옮긴다
+
 
 # 검토 결과 중 "사람이 반드시 봐야 하는" 유형. 나머지는 기록만 한다.
 # skills/review-coverletter.md 의 issues[].kind 와 같은 문자열이어야 한다.
 BLOCKING_REVIEW_KINDS = frozenset({ISSUE_UNSUPPORTED_CLAIM, ISSUE_NEW_UNRELATED_CLAIM,
                                     ISSUE_FABRICATED_FACT})
-MAX_REPAIRS = 1   # 설계검토 B-3: 수정은 최대 1회. 그 뒤엔 사람에게 넘긴다
+
 
 
 class LengthSpec(NamedTuple):
@@ -946,7 +1012,7 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
                                  length: LengthSpec,
                                  context: 'CoverletterContext',
                                  override_filenames=None,
-                                 max_experiences: int = MAX_EXPERIENCES,
+                                 max_experiences: int = MAX_EXPERIENCES_BY_CONTRACT,
                                  allow_unresearched_company: bool = False,
                                  output_dir: Optional[Path] = None,
                                  folder_name: Optional[str] = None,
