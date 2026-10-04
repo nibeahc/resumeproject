@@ -156,6 +156,16 @@ ISSUE_EVIDENCE_UNCOVERED = 'evidence_uncovered_claim'
 
 # 검토 결과 중 "사람이 반드시 봐야 하는" 유형. 나머지는 기록만 한다.
 # skills/review-coverletter.md 의 issues[].kind 와 같은 문자열이어야 한다.
+# S11-21: 심각도 3단계. 공유받은 검수 프롬프트의 [반드시 수정] / [수정하면 더 좋아짐] /
+# [굳이 수정할 필요 없음] 을 그대로 가져왔다. 예전엔 차단성/경고 2단계뿐이라 사소한 지적이
+# 같은 무게로 올라왔다 — "AI 는 모든 문장을 검수하려 한다" 는 문제를 코드가 걸러준다.
+SEVERITY_MUST_FIX = 'must_fix'
+SEVERITY_BETTER = 'better'
+SEVERITY_OPTIONAL = 'optional'
+SEVERITIES = (SEVERITY_MUST_FIX, SEVERITY_BETTER, SEVERITY_OPTIONAL)
+# S11-21: 기업 고유 사실이 하나도 없는 지원 동기 (회사명만 바꾸면 다른 회사에 내도 되는 글)
+ISSUE_GENERIC_MOTIVE = 'generic_motivation'
+
 BLOCKING_REVIEW_KINDS = frozenset({ISSUE_UNSUPPORTED_CLAIM, ISSUE_NEW_UNRELATED_CLAIM,
                                     ISSUE_FABRICATED_FACT})
 
@@ -1196,11 +1206,79 @@ def parse_review(text: str, expected_ids, allowed_fact_ids=()) -> Tuple[Optional
             return None, 'issues 항목이 객체가 아님'
         if set(issue.get('sentence_ids') or []) - expected:
             return None, '지적이 없는 문장 ID 를 가리킴'
+        # S11-21: 심각도를 안 적었으면 유형으로 정한다. 차단성 유형은 must_fix,
+        # 나머지는 better — 못 읽은 심각도 때문에 지적이 조용히 사라지지 않게 한다.
+        sev = issue.get('severity')
+        if sev is None:
+            issue['severity'] = (SEVERITY_MUST_FIX if issue.get('kind') in BLOCKING_REVIEW_KINDS
+                                 else SEVERITY_BETTER)
+        elif sev not in SEVERITIES:
+            return None, f'알 수 없는 심각도: {sev!r} (허용: {", ".join(SEVERITIES)})'
     return data, None
 
 
 def blocking_issues(review: dict) -> List[dict]:
-    return [i for i in review.get('issues', []) if i.get('kind') in BLOCKING_REVIEW_KINDS]
+    """자동 수정을 걸 지적만 고른다. 차단성 유형이면서 심각도가 must_fix 인 것.
+
+    S11-21: 심각도를 더했다. 평가자가 차단성 유형으로 적었어도 "굳이 고칠 필요 없음" 이라고
+    판단했다면 수정 호출을 쓰지 않는다 — 고치지 않아도 되는 것까지 고치면 사용자가
+    원래 쓴 문장이 사라진다.
+    """
+    return [i for i in review.get('issues', [])
+            if i.get('kind') in BLOCKING_REVIEW_KINDS
+            and i.get('severity', SEVERITY_MUST_FIX) == SEVERITY_MUST_FIX]
+
+
+def issues_by_severity(review: Optional[dict]) -> dict:
+    """심각도별 지적 수. 화면이 "반드시 3건, 더 좋아짐 2건" 처럼 보여줄 수 있게."""
+    out = {s: 0 for s in SEVERITIES}
+    for i in (review or {}).get('issues', []):
+        sev = i.get('severity', SEVERITY_BETTER)
+        if sev in out:
+            out[sev] += 1
+    return out
+
+
+# 기업 자료에서 "이 회사에만 있는 말" 을 뽑는 패턴. 따옴표로 묶인 구절(비전, 슬로건),
+# ASCII 고유명사, 그리고 수치다.
+_QUOTED = re.compile("[\u201c\u2018'\"]([^\u201d\u2019'\"\n]{4,60})[\u201d\u2019'\"]")
+_ASCII_NAME = re.compile(r'[A-Z][A-Za-z0-9+.\-]{2,29}')
+# 기업 파일은 비전과 핵심가치를 **굵은 글씨**로도 적는다. 따옴표만 보면 놓친다
+# (실제로 '가장 신뢰받는 공급망 파트너' 를 못 잡아서 발견했다).
+_BOLD = re.compile(r'\*\*([^*\n]{4,60})\*\*')
+
+
+def company_specific_terms(company_text: str) -> List[str]:
+    """기업 자료에서 그 회사에만 해당하는 표현을 뽑는다."""
+    terms, seen = [], set()
+    for m in list(_QUOTED.findall(company_text or '')) + list(_BOLD.findall(company_text or '')):
+        key = re.sub(r'\s+', '', m)
+        if key and key not in seen:
+            seen.add(key)
+            terms.append(m.strip())
+    for m in _ASCII_NAME.findall(company_text or ''):
+        if m.lower() in _TERM_NOISE or m in seen:
+            continue
+        seen.add(m)
+        terms.append(m)
+    return terms
+
+
+def check_company_specificity(answer: str, company_text: str) -> List[str]:
+    """초안이 기업 자료의 고유한 말을 실제로 쓰고 있는지 본다 (S11-21).
+
+    공유받은 검수 프롬프트의 "회사명만 바꾸면 다른 회사에도 제출할 수 있는 내용은
+    없는가" 를 코드가 할 수 있는 만큼만 가져왔다. **빈 리스트면 범용 글**이라는 신호다.
+
+    기업명 자체는 세지 않는다 — 회사명만 바꿔 끼우는 것이 바로 문제이기 때문이다.
+    판정이 아니라 신호다. 지원 동기 문항에만 쓰고, 경험 서술 문항에는 쓰지 않는다.
+    """
+    flat = re.sub(r'\s+', '', answer or '')
+    found = []
+    for term in company_specific_terms(company_text):
+        if re.sub(r'\s+', '', term) in flat and term not in found:
+            found.append(term)
+    return found
 
 
 def build_repair_prompt(review: dict, draft: str, allowed_filenames) -> str:
@@ -1597,6 +1675,17 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
             found.extend(lint_evidence(ev_rows, answer_text, exp_by_name))
         ev_report = evidence_report(ev_rows, exp_by_name)
 
+        # S11-21: 지원 동기 문항인데 기업 고유 사실이 하나도 없으면 회사명만 바꿔
+        # 다른 회사에 내도 되는 글이다. 경험 서술 문항에는 적용하지 않는다.
+        company_terms = []
+        # 기업 자료에서 뽑을 고유 표현이 애초에 없으면 범용이라고 판정할 근거가 없다.
+        # 그건 자료가 얇다는 문제이고 company_evidence_thin 이 따로 다룬다.
+        available = company_specific_terms(ctx.company_text)
+        if selection['question_type'] == '지원동기형' and available:
+            company_terms = check_company_specificity(answer_text, ctx.company_text)
+            if not company_terms:
+                found.append(ISSUE_GENERIC_MOTIVE)
+
         # S11-11: 코드로 판정 가능한 개인 규칙(현재는 가운뎃점 금지). 예전엔
         # writing-rules.md 에 적혀 있어도 프롬프트에만 맡겨져 있었다.
         broken = check_personal_rules(answer_text, ctx.rules_text)
@@ -1608,12 +1697,12 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
         if unexplained:
             found.append(ISSUE_UNEXPLAINED_NAME)
         return (found, n, over, plan_rows, cited_, unknown_, nums, orgs, broken,
-                unexplained, jd_only, unsupported_terms, ev_report)
+                unexplained, jd_only, unsupported_terms, ev_report, company_terms)
 
     (det, actual, exceeded, plan, cited_experiences, unknown_cited,
      unverified_numbers, unverified_orgs, broken_rules, unexplained_names,
      jd_only_facts, jd_terms_unsupported,
-     evidence) = deterministic_check(result['text'], answer, meta)
+     evidence, company_terms) = deterministic_check(result['text'], answer, meta)
     if jd_only_facts or jd_terms_unsupported:
         yield 'progress', {'stage': 'jd_scope', 'facts': jd_only_facts,
                             'terms': jd_terms_unsupported}
@@ -1671,7 +1760,7 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
                     if new_answer:
                         (new_det, n2, over2, plan2, cited2, unknown2,
                          nums2, orgs2, broken2, unexplained2,
-                         jd2, terms2, ev2) = deterministic_check(
+                         jd2, terms2, ev2, ct2) = deterministic_check(
                             repaired['text'], new_answer, new_meta)
                         # 검토 지적을 고치면서 글자수나 사실이 틀어졌다면 수정본을 버린다.
                         worse = set(new_det) - set(det)
@@ -1685,7 +1774,7 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
                             unverified_numbers, unverified_orgs = nums2, orgs2
                             broken_rules, unexplained_names = broken2, unexplained2
                             jd_only_facts, jd_terms_unsupported = jd2, terms2
-                            evidence = ev2
+                            evidence, company_terms = ev2, ct2
                     else:
                         yield 'progress', {'stage': 'repair_failed', 'error': 'ANSWER 블록 없음'}
             # 수정 후에도(또는 수정 없이) 남은 차단성 지적은 사람에게 넘긴다.
@@ -1715,7 +1804,8 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
             'cited_experiences': cited_experiences,
             'plan': plan, 'review': review, 'review_error': review_error, 'repairs': repairs,
             'jd_only_facts': jd_only_facts, 'jd_terms_unsupported': jd_terms_unsupported,
-            'evidence': evidence,
+            'evidence': evidence, 'company_terms': company_terms,
+            'review_severity': issues_by_severity(review),
             'quality_checked': bool(quality_check and review is not None and not review_error),
             'run_id': None,   # 저장하지 않는 호출이라 실행 기록도 남기지 않는다
         }
@@ -1823,6 +1913,9 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
         'jd_terms_unsupported': jd_terms_unsupported,
         # S11-19: 주장별 근거 대조 결과. verdict 는 "그 인용이 원문에 있는가" 만 말한다.
         'evidence': evidence,
+        # S11-21: 이 글이 쓴 기업 고유 표현. 비면 범용 글이라는 신호다.
+        'company_terms': company_terms,
+        'review_severity': issues_by_severity(review),
         'review': review,
         'review_error': review_error,
         'repairs': repairs,
