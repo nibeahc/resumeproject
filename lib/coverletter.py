@@ -1412,9 +1412,12 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
                                 'max_age_days': COMPANY_EVIDENCE_MAX_AGE_DAYS}
 
     # Step 5~7: 경험 선택은 LLM 이 아니라 코드가 한다 (S3-1). 선택된 것만 프롬프트에 실린다.
+    # S11-20: 공고를 함께 넘긴다. 예전엔 문항과 관심직무만 봤다 — 이 문항에 어울리는
+    # 경험은 골라도 이 회사가 찾는 경험은 고르지 못했다.
     selection = select_experiences(exp_dir, question, interest_text=ctx.interest_text,
                                     max_count=max_experiences,
-                                    override_filenames=override_filenames)
+                                    override_filenames=override_filenames,
+                                    job_text=ctx.job_text)
 
     # S11-2: selector 는 보고만 한다. 중단 여부는 여기서 정한다.
     # UI 가 체크박스를 2개로 묶어도 API 를 직접 부르면 그냥 들어왔다 — 서비스 쪽에서 막아야 한다.
@@ -1447,7 +1450,8 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
         'stage': 'selected',
         'question_type': selection['question_type'],
         'selected': [{'filename': c.experience.filename, 'title': c.experience.title,
-                      'score': c.score, 'reasons': c.reasons} for c in selection['selected']],
+                      'score': c.score, 'reasons': c.reasons,
+                      'jd_matched': c.jd_matched} for c in selection['selected']],
         'candidates': [{'filename': c.experience.filename, 'title': c.experience.title,
                         'score': c.score, 'reasons': c.reasons} for c in selection['candidates'][:6]],
     }

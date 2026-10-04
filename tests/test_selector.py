@@ -263,3 +263,60 @@ class SelectTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class JobAwareRankingTest(unittest.TestCase):
+    """S11-20. 예전에는 rank_experiences 가 **공고를 아예 보지 않았다.**
+    문항 문구와 관심직무만 봤으므로, 문항에 키워드가 없으면 전 경험이 0점이 되어
+    사실상 최신순으로 뽑혔다. "공고에 핏한 경험" 을 고를 수 없는 구조였다.
+    """
+
+    JD = ('계약물류 창고 운영. 입출고 수량 확인과 재고 관리, 표준 운영 절차 준수. '
+          '해상 항공 포워딩 3PL')
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        make_experience(self.tmp, '2026-포워딩.md', '포워딩 인턴',
+                        '전문성·직무역량', '포워딩, 3PL, 선적서류')
+        make_experience(self.tmp, '2026-베이킹.md', '베이킹 동아리',
+                        '팀워크', '제과, 동아리, 취미')
+        self.experiences = S.load_all_experiences(self.tmp)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def rank(self, job_text=''):
+        _, c = S.rank_experiences('지원 동기를 서술하시오', self.experiences, job_text=job_text)
+        return {x.experience.filename: x for x in c}
+
+    def test_without_job_everything_ties_at_zero(self):
+        """회귀 기록: 문항에 키워드가 없으면 전부 0점이었다. 이것이 S11-20 의 출발점이다."""
+        got = self.rank()
+        self.assertEqual(got['2026-포워딩.md'].score, 0.0)
+        self.assertEqual(got['2026-베이킹.md'].score, 0.0)
+
+    def test_job_keywords_lift_the_relevant_experience(self):
+        got = self.rank(self.JD)
+        self.assertGreater(got['2026-포워딩.md'].score, got['2026-베이킹.md'].score)
+        self.assertIn('포워딩', got['2026-포워딩.md'].jd_matched)
+
+    def test_reason_says_it_came_from_the_job_posting(self):
+        got = self.rank(self.JD)
+        self.assertTrue(any('공고와 겹치는' in r for r in got['2026-포워딩.md'].reasons))
+
+    def test_unrelated_experience_is_not_lifted(self):
+        self.assertEqual(self.rank(self.JD)['2026-베이킹.md'].jd_matched, [])
+
+    def test_synonyms_bridge_different_wording(self):
+        """공고가 '포워딩', 경험이 '해운물류' 면 같은 일인데 문자열이 안 겹친다."""
+        make_experience(self.tmp, '2026-해운.md', '해운 분석 프로젝트',
+                        '전문성·직무역량', '해운물류, 이상탐지')
+        exps = S.load_all_experiences(self.tmp)
+        _, c = S.rank_experiences('지원 동기를 서술하시오', exps, job_text=self.JD)
+        haeun = next(x for x in c if x.experience.filename == '2026-해운.md')
+        self.assertGreater(haeun.score, 0)
+        self.assertTrue(haeun.jd_matched)
+
+    def test_select_passes_job_through(self):
+        got = S.select(self.tmp, '지원 동기를 서술하시오', job_text=self.JD)
+        self.assertEqual(got['selected'][0].experience.filename, '2026-포워딩.md')

@@ -53,6 +53,10 @@ _TITLE = re.compile(r'^# (.+)$', re.M)
 # 실제 경험 카테고리·실측에서 반복 확인된 것들로 우선 채웠다 — 새 사각지대가 발견되면 그룹만
 # 추가하면 된다(코드 구조는 안 바뀜).
 SYNONYM_GROUPS = [
+    # S11-20 에서 추가. 이 사용자의 주 직무 영역인데 그룹이 아예 없었다 — 공고에 "포워딩",
+    # 경험에 "해운물류" 라고 적혀 있으면 서로 연결되지 않았다 (실측으로 확인).
+    {'물류', 'SCM', '공급망', '포워딩', '해운', '해운물류', '3PL', '물류기기',
+     '창고', '재고', '입출고', '통관', '선적'},
     # 국가명은 "해외"의 동의어가 아니라 사례(instance-of)지만, 실제 경험 파일 제목에 국가명이
     # 그대로 들어가는 경우가 흔해서(예: "호주 인턴십", "교환학생-네덜란드") 실용적으로 여기 묶어둔다.
     # 전 세계 국가를 다 넣을 수는 없다 — 유학/인턴 목적지로 흔한 것 위주로만 채운다(완전한 목록이
@@ -85,6 +89,9 @@ class Candidate:
     experience: Experience
     score: float
     reasons: List[str] = field(default_factory=list)
+    # S11-20: 이 경험이 **공고의 어느 말과** 겹쳤는가. 점수만 보여주면 "왜 이게 뽑혔나" 에
+    # 답할 수 없다. 화면과 호출자가 그대로 쓸 수 있게 목록으로 남긴다.
+    jd_matched: List[str] = field(default_factory=list)
 
 
 def classify_question(question: str) -> str:
@@ -191,10 +198,15 @@ def _emphasized_in_interest(title: str, interest_text: str) -> bool:
 
 
 def rank_experiences(question: str, experiences: List[Experience],
-                      interest_text: str = '') -> (str, List[Candidate]):
+                      interest_text: str = '', job_text: str = '') -> (str, List[Candidate]):
     """Step 5~7. (질문 유형, 점수순 후보 목록) 을 돌려준다. 점수 0 인 것도 포함한다 —
     후보가 하나도 없는 것보다는, 근거가 약해도 뭐라도 고르는 게 낫다 (경험형은 원래 카테고리
-    가중치가 없어서 대부분 키워드 매칭에만 의존한다)."""
+    가중치가 없어서 대부분 키워드 매칭에만 의존한다).
+
+    **S11-20**: job_text 를 주면 공고와 겹치는 경험에 가중치를 준다. 예전에는 이 함수가
+    공고를 아예 보지 않았다 — 문항 문구와 관심직무만 봤다. 그래서 "이 문항에 어울리는
+    경험" 은 골라도 "이 회사가 찾는 경험" 은 고르지 못했다. 공고에 핏한 경험이 내가
+    좋다고 생각하는 경험보다 우선한다는 것이 지원 서류의 기본이다."""
     q_type = classify_question(question)
     preferred_category = TYPE_PREFERRED_CATEGORY[q_type]
 
@@ -221,6 +233,27 @@ def rank_experiences(question: str, experiences: List[Experience],
             score += 1.5
             reasons.append(f'{q_type}에 맞는 카테고리({preferred_category})')
 
+        # S11-20: 공고와 겹치는 신호. 문항 키워드(2점)와 같은 무게를 준다 —
+        # 어느 한쪽이 지배하면 "문항에만 맞는 글" 이거나 "공고 키워드만 나열한 글" 이 된다.
+        jd_matched = []
+        if job_text:
+            jd_matched = _matched_keywords(job_text, exp.keywords)
+            jd_title = [w for w in _matched_title_words(job_text, exp.title)
+                        if w not in jd_matched]
+            # 공고의 말과 경험의 말이 다를 수 있다. 공고가 "포워딩", 경험이 "해운물류" 면
+            # 같은 일인데 문자열은 안 겹친다.
+            jd_syn = _matched_synonyms(job_text, exp)
+            if jd_matched:
+                score += 2 * len(jd_matched)
+                reasons.append(f'공고와 겹치는 키워드: {", ".join(jd_matched)}')
+            if jd_title:
+                score += 1 * len(jd_title)
+                reasons.append(f'공고와 겹치는 제목 단어: {", ".join(jd_title)}')
+            if jd_syn:
+                score += 1.5 * len(jd_syn)
+                reasons.append(f'공고와 동의어로 연결: {", ".join(jd_syn)}')
+            jd_matched = jd_matched + jd_title + jd_syn
+
         if _emphasized_in_interest(exp.title, interest_text):
             score += 1
             reasons.append('관심직무.md 가 이 직무에서 강조하라고 지정한 경험')
@@ -230,7 +263,8 @@ def rank_experiences(question: str, experiences: List[Experience],
         if exp.old_flag:
             reasons.append('⚠️ 오래된 경험 — 사용 전 확인 필요')
 
-        candidates.append(Candidate(experience=exp, score=round(score, 2), reasons=reasons))
+        candidates.append(Candidate(experience=exp, score=round(score, 2),
+                                     reasons=reasons, jd_matched=jd_matched))
 
     # 점수가 같으면 최근 경험을 우선한다 (동점일 때 매번 같은 두 경험만 뽑히는 것을 줄인다)
     candidates.sort(key=lambda c: (c.score, _recency_key(c.experience.filename)), reverse=True)
@@ -261,7 +295,8 @@ def pick(candidates: List[Candidate], max_count: int = MAX_EXPERIENCES) -> List[
 
 
 def select(exp_dir: Path, question: str, interest_text: str = '',
-           max_count: int = MAX_EXPERIENCES, override_filenames: Optional[List[str]] = None):
+           max_count: int = MAX_EXPERIENCES, override_filenames: Optional[List[str]] = None,
+           job_text: str = ''):
     """전체 흐름. override_filenames 를 주면 알고리즘을 건너뛰고 그 파일들을 그대로 쓴다
     (S3-2 UI 에서 사용자가 직접 고른 경우). 그래도 순위 목록(candidates)은 항상 함께 돌려준다 —
     UI 가 "왜 다른 경험이 후보였는지"를 보여줄 수 있어야 하기 때문이다.
@@ -279,7 +314,7 @@ def select(exp_dir: Path, question: str, interest_text: str = '',
            'duplicate_overrides': 중복 지정된 파일명}
     """
     experiences = load_all_experiences(exp_dir)
-    q_type, candidates = rank_experiences(question, experiences, interest_text)
+    q_type, candidates = rank_experiences(question, experiences, interest_text, job_text)
 
     unknown_overrides: List[str] = []
     dropped_overrides: List[str] = []
