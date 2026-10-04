@@ -150,3 +150,69 @@ class PlanEventsTest(EngineFixture, unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class PlanRouteTest(unittest.TestCase):
+    """S11-23: 화면에서 부르는 경로. 계획은 문서당 한 번이고 문항별 생성과 분리된다."""
+
+    def setUp(self):
+        import shutil as _sh, tempfile as _tf
+        from datetime import date
+        from web import create_app
+        self._sh = _sh
+        self.tmp = Path(_tf.mkdtemp())
+        self.root = self.tmp / 'root'
+        u = self.root / 'users' / '홍길동'
+        (u / 'experiences').mkdir(parents=True)
+        (u / 'experiences' / '2024-테스트경험.md').write_text(
+            '# 테스트 경험\n\n## 메타\n\n- 카테고리: 리더십\n- 키워드: 리더십, 팀워크\n\n내용',
+            encoding='utf-8')
+        (u / 'profile.md').write_text('프로필', encoding='utf-8')
+        (self.root / 'outputs' / '홍길동').mkdir(parents=True)
+        c = self.root / 'companies'
+        c.mkdir(parents=True)
+        (c / '테스트기업.md').write_text(
+            f'# 테스트기업\n\n> 확인일: {date.today().isoformat()}\n'
+            '> 출처: https://example.com/about\n\n**가장 믿을 만한 파트너**\n', encoding='utf-8')
+        app = create_app({'PROJECT_ROOT': self.root, 'DB_PATH': self.tmp / 'app.db',
+                           'TESTING': True})
+        self.c = app.test_client()
+
+    def tearDown(self):
+        self._sh.rmtree(self.tmp, ignore_errors=True)
+
+    def post(self, **kw):
+        payload = {'company': '테스트기업', 'position': '테스트직무',
+                   'questions': [{'text': '지원 동기', 'limit': 500},
+                                 {'text': '성격의 장단점', 'limit': 600}]}
+        payload.update(kw)
+        return self.c.post('/generate/홍길동/plan', json=payload)
+
+    def test_empty_questions_rejected_without_calling_llm(self):
+        from unittest.mock import patch
+        import web.routes.generate as route
+        with patch.object(route, 'stream_complete') as m:
+            body = self.post(questions=[]).get_data(as_text=True)
+        m.assert_not_called()
+        self.assertIn('문항을 하나 이상', body)
+
+    def test_too_many_questions_rejected(self):
+        body = self.post(questions=[{'text': f'문항{i}'} for i in range(11)]).get_data(as_text=True)
+        self.assertIn('10개까지', body)
+
+    def test_missing_company_rejected(self):
+        self.assertIn('기업명', self.post(company='').get_data(as_text=True))
+
+    def test_path_traversal_in_company_rejected(self):
+        self.assertIn('사용할 수 없는 문자', self.post(company='../../etc').get_data(as_text=True))
+
+    def test_plan_is_returned_as_sse_done(self):
+        from unittest.mock import patch
+        import web.routes.generate as route
+        text = plan_text(['q1 | 진정성 | 2024-테스트경험.md | 리더십 | 메시지 하나 | 관심 → 연결',
+                          'q2 | 성향 | 2024-테스트경험.md | 꼼꼼함 | 메시지 둘 | 주장 → 장면'])
+        with patch.object(route, 'stream_complete', return_value=llm_result(text)):
+            body = self.post().get_data(as_text=True)
+        self.assertIn('event: done', body)
+        self.assertIn('positioning', body)
+        self.assertIn('assignments', body)

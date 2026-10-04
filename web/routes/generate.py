@@ -27,7 +27,7 @@ from lib.coverletter import (ISSUE_CITED_UNKNOWN, ISSUE_DROPPED_OVERRIDES,  # no
                              LENGTH_TOLERANCE, MAX_CHAR_LIMIT, MAX_RETRIES, STATUS_READY,
                              STATUS_REVIEW_REQUIRED, TARGET_UNDERSHOOT, LengthSpec, build_prompt,
                              build_retry_prompt, count_chars, gather_context,
-                             generate_coverletter_events, parse_answer, read_if_exists,
+                             generate_coverletter_events, plan_document_events, parse_answer, read_if_exists,
                              revise_coverletter_events, strip_placeholder_rules,
                              validate_cited_experiences)
 from lib.llm import stream_complete
@@ -170,6 +170,74 @@ def generate(name):
                 allow_unresearched_company=allow_unresearched,
                 output_dir=output_dir(name), db_path=db_path,
                 quality_check=use_quality_check, surface='web', complete=stream_complete):
+            yield sse(event, ev_data)
+
+    return Response(stream_with_context(stream()), mimetype='text/event-stream')
+
+
+def _parse_questions(data):
+    """문서 배분 계획용 문항 목록을 읽는다. [{'id','text','limit'}] 또는 오류 목록."""
+    raw = data.get('questions')
+    if isinstance(raw, str):
+        import json as _json
+        try:
+            raw = _json.loads(raw)
+        except ValueError:
+            return [], ['문항 목록을 읽을 수 없습니다.']
+    if not isinstance(raw, list) or not raw:
+        return [], ['문항을 하나 이상 입력해 주세요.']
+    if len(raw) > 10:
+        return [], ['문항은 한 번에 10개까지 받습니다.']
+    out, errors = [], []
+    for i, item in enumerate(raw, 1):
+        text = (item.get('text') or '').strip() if isinstance(item, dict) else str(item).strip()
+        if not text:
+            errors.append(f'{i}번째 문항이 비어 있습니다.')
+            continue
+        limit = item.get('limit') if isinstance(item, dict) else None
+        try:
+            limit = int(limit) if limit not in (None, '', 0) else None
+        except (TypeError, ValueError):
+            limit = None
+        out.append({'id': f'q{len(out) + 1}', 'text': text, 'limit': limit})
+    return out, errors
+
+
+@bp.route('/generate/<name>/plan', methods=['POST'])
+def plan_document(name):
+    """S11-22/23: 문항을 쓰기 **전에** 문서 전체 소재 배분을 세운다.
+
+    문항별 생성과 분리된 라우트다 — 계획은 문서당 한 번이고, 그 결과를 보고
+    사용자가 문항별 생성을 시작한다.
+    """
+    root = user_dir(name)
+    data = request.get_json(silent=True) or request.form
+    company = (data.get('company') or '').strip()
+    position = (data.get('position') or '').strip()
+    questions, errors = _parse_questions(data)
+    for label, value in (('기업명', company), ('직무명', position)):
+        if not value:
+            errors.append(f'{label}을(를) 입력해 주세요.')
+        elif not valid_segment(value):
+            errors.append(f'{label}에 사용할 수 없는 문자가 있습니다.')
+
+    if errors:
+        def bad():
+            yield sse('error', {'message': ' '.join(errors)})
+        return Response(bad(), mimetype='text/event-stream')
+
+    ctx = gather_context(root,
+                         companies_dir=project_root() / 'companies',
+                         references_dir=project_root() / 'references' / 'coverletter',
+                         company=company, position=position,
+                         trends_base=trends_dir(), use_trends=_parse_use_trends(data))
+    db_path = _db_path()
+
+    def stream():
+        for event, ev_data in plan_document_events(
+                name, questions, root / 'experiences',
+                company=company, position=position, context=ctx,
+                db_path=db_path, surface='web', complete=stream_complete):
             yield sse(event, ev_data)
 
     return Response(stream_with_context(stream()), mimetype='text/event-stream')

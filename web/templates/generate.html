@@ -38,6 +38,11 @@
 .ev-bad { border-left-color:#c0392b; background:#fdecea; }
 .ev-mark { font-weight:600; }
 .ev-src { color:#666; font-size:12px; margin-top:2px; }
+.plan-positioning { font-weight:600; margin:8px 0; }
+.plan-row { border-left:3px solid #d2d2d7; padding:6px 10px; margin-bottom:8px; font-size:13px; }
+.plan-row b { display:inline-block; min-width:28px; }
+.plan-meta { color:#6e6e73; font-size:12px; margin-top:2px; }
+.plan-use { margin-top:6px; }
 .quality-badge { display:inline-block; margin-right:6px; padding:2px 8px;
   border-radius:10px; font-size:12px; }
 .quality-ok { background:#e6f4ea; color:#1e7e34; }
@@ -97,6 +102,30 @@
       </option>
       {% endfor %}
     </select>
+  </div>
+
+  <!-- S11-23: 문항을 하나씩 쓰기 **전에** 문서 전체 소재를 배분한다.
+       문항마다 최선을 고르면 문항별로는 맞는데 문서 전체로는 같은 경험이 반복된다. -->
+  <div class="card">
+    <h2 style="margin-bottom:4px;">먼저: 문서 전체 배분 계획 (선택)</h2>
+    <p style="font-size:12px; color:#6e6e73; margin-bottom:10px;">
+      자소서 문항을 전부 적으면 어느 경험을 어느 문항에 쓸지 먼저 나눕니다.
+      같은 경험이 여러 문항에 반복되거나 같은 역량만 강조되는 것을 이 단계에서 잡습니다.
+    </p>
+    <label class="form-label">문항 목록 (한 줄에 하나. <code>문항 / 글자수</code> 형식도 됩니다)</label>
+    <textarea class="form-input" id="planQuestions" rows="4"
+      placeholder="지원 동기를 서술하시오 / 800&#10;성격의 장단점을 서술하시오 / 600&#10;입사 후 포부 / 500"></textarea>
+    <button type="button" class="btn btn-secondary" style="margin-top:10px;"
+            id="planBtn" onclick="planDocument()"
+            {% if exp_count == 0 %}disabled{% endif %}>배분 계획 세우기 →</button>
+  </div>
+
+  <div class="card" id="planBox" style="display:none;">
+    <h2 style="margin-bottom:4px;">배분 계획</h2>
+    <div id="planSpinner" class="spinner" style="display:none;"></div>
+    <div id="planPositioning" class="plan-positioning"></div>
+    <div id="planIssues" class="warn-card" style="display:none;"></div>
+    <div id="planTable"></div>
   </div>
 
   <div class="card">
@@ -370,6 +399,96 @@ function bundleLogLine(text) {
 
 const BUNDLE_DOC_LABEL = { match: '매칭', resume: '이력서', portfolio: '포트폴리오', coverletter: '자소서' };
 
+// S11-23: 문서 전체 배분 계획. 문항별 생성과 분리된 호출이고, 문서당 한 번이다.
+function parsePlanQuestions(raw) {
+  return raw.split('\n').map(function (line) {
+    const s = line.trim();
+    if (!s) return null;
+    const m = s.match(/^(.*?)\s*\/\s*(\d+)\s*자?$/);
+    return m ? { text: m[1].trim(), limit: parseInt(m[2], 10) } : { text: s, limit: null };
+  }).filter(Boolean);
+}
+
+async function planDocument() {
+  const company = document.getElementById('company').value.trim();
+  const position = document.getElementById('position').value.trim();
+  const questions = parsePlanQuestions(document.getElementById('planQuestions').value);
+  if (!company || !position) { toast('기업명과 직무명을 먼저 입력해주세요.'); return; }
+  if (!questions.length) { toast('문항을 한 줄에 하나씩 적어주세요.'); return; }
+
+  const btn = document.getElementById('planBtn');
+  btn.disabled = true;
+  document.getElementById('planBox').style.display = '';
+  document.getElementById('planSpinner').style.display = '';
+  document.getElementById('planTable').innerHTML = '';
+  document.getElementById('planIssues').style.display = 'none';
+  document.getElementById('planPositioning').textContent = '계획을 세우는 중...';
+
+  try {
+    const res = await fetch('/generate/{{ user }}/plan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ company, position, questions,
+                             use_trends: document.getElementById('useTrends').checked }),
+    });
+    await consumeSSE(res, function (event, data) {
+      if (event === 'error') { toast(data.message || '계획 생성에 실패했습니다.'); return; }
+      if (event === 'done') renderPlan(data, questions);
+    });
+  } catch (e) {
+    toast('계획 생성 중 오류가 발생했습니다.');
+  } finally {
+    btn.disabled = false;
+    document.getElementById('planSpinner').style.display = 'none';
+  }
+}
+
+function renderPlan(data, questions) {
+  document.getElementById('planPositioning').textContent =
+    data.positioning || '(전체 포지셔닝을 받지 못했습니다)';
+
+  const issues = data.issues || [];
+  const box = document.getElementById('planIssues');
+  if (issues.length) {
+    box.style.display = '';
+    box.textContent = '⚠️ 확인이 필요합니다 — '
+      + issues.map(function (c) { return issueLabel(c, data); }).join(' / ');
+  } else {
+    box.style.display = 'none';
+  }
+
+  document.getElementById('planTable').innerHTML = (data.plan || []).map(function (r, i) {
+    const q = questions[i] ? questions[i].text : '';
+    const files = (r.experiences || []).join(', ') || '(지정 안 됨)';
+    return '<div class="plan-row"><b>' + escapeHtml(r.id) + '</b> '
+      + escapeHtml(q) + '<div class="plan-meta">확인하려는 것: ' + escapeHtml(r.checks || '-')
+      + ' · 역량: ' + escapeHtml(r.strength || '-') + '</div>'
+      + '<div class="plan-meta">핵심 메시지: ' + escapeHtml(r.message || '-') + '</div>'
+      + '<div class="plan-meta">흐름: ' + escapeHtml(r.flow || '-')
+      + ' · 경험: ' + escapeHtml(files) + '</div>'
+      + '<div class="plan-use"><button type="button" class="btn btn-sm" '
+      + 'onclick="usePlanRow(' + i + ')">이 문항부터 작성 →</button></div></div>';
+  }).join('');
+  window.__planData = { plan: data.plan || [], questions: questions };
+}
+
+// 계획의 한 줄을 문항 작성 폼으로 옮긴다. 배분한 경험이 그대로 override 로 들어간다.
+function usePlanRow(index) {
+  const d = window.__planData;
+  if (!d || !d.plan[index]) return;
+  const row = d.plan[index];
+  const q = d.questions[index] || {};
+  document.getElementById('question').value = q.text || '';
+  if (q.limit) {
+    document.getElementById('charLimit').value = q.limit;
+    const bounded = document.querySelector('input[name="lengthMode"][value="bounded"]');
+    if (bounded) { bounded.checked = true; bounded.dispatchEvent(new Event('change')); }
+  }
+  window.__planOverride = row.experiences || [];
+  toast('문항을 옮겼습니다. 배분한 경험 ' + (row.experiences || []).length + '개로 생성합니다.');
+  document.getElementById('question').scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
 async function generateBundle() {
   const jobId = document.getElementById('jobSelect').value;
   const question = document.getElementById('question').value.trim();
@@ -463,6 +582,11 @@ function onLengthModeChange() {
 }
 
 async function generate(overrideFiles, opts = {}) {
+  // S11-23: 배분 계획에서 "이 문항부터 작성" 을 눌렀으면 그 경험을 쓴다 (한 번만).
+  if (!overrideFiles && window.__planOverride && window.__planOverride.length) {
+    overrideFiles = window.__planOverride;
+    window.__planOverride = null;
+  }
   const company = document.getElementById('company').value.trim();
   const position = document.getElementById('position').value.trim();
   const question = document.getElementById('question').value.trim();
@@ -590,6 +714,15 @@ const ISSUE_LABELS = {
   evidence_uncovered_claim: '본인이 했다고 쓴 문장 중 근거를 대지 않은 것이 있음',
   // S11-21: 회사명만 바꾸면 다른 회사에도 낼 수 있는 지원 동기
   generic_motivation: '기업 고유 사실이 하나도 없음 (회사명만 바꾸면 다른 회사에도 제출 가능)',
+  // S11-22/23: 문서 전체 배분에서만 보이는 문제들
+  docplan_missing: '배분 계획을 받지 못함',
+  docplan_question_mismatch: '계획의 문항 번호가 입력한 문항과 다름',
+  docplan_unknown_experience: '없는 경험 파일을 배분함',
+  docplan_experience_overused: '같은 경험이 과반 문항에 들어감 (문서가 한 경험에 기댐)',
+  docplan_same_strength: '모든 문항이 같은 역량만 강조함',
+  docplan_no_message: '핵심 메시지가 비어 있는 문항이 있음',
+  docplan_uniform_flow: '모든 문항의 글 흐름이 똑같음 (문항 성격에 맞게 달라야 함)',
+  docplan_no_positioning: '전체를 관통하는 포지셔닝 한 문장이 없음',
 };
 
 function issueLabel(code, data) {

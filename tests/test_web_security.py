@@ -36,6 +36,8 @@ EXPECTED_ROUTES = {
     ('/generate/<name>', 'POST'),
     ('/generate/<name>', 'GET'),
     ('/generate/<name>/bundle', 'POST'),
+    # S11-23: 문항을 쓰기 전에 문서 전체 소재를 배분하는 계획 단계
+    ('/generate/<name>/plan', 'POST'),
     ('/generate/<name>/revise', 'POST'),
     ('/raw-fallback/<name>', 'POST'),
     ('/elicit/<name>', 'GET'),
