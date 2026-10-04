@@ -31,7 +31,11 @@
   .answer-text { white-space:pre-wrap; line-height:1.8; font-size:14px; }
   .meta-text { white-space:pre-wrap; font-size:12px; color:#6e6e73; line-height:1.8; margin-top:14px;
                padding-top:14px; border-top:1px solid #f0f0f5; }
-  .char-badge { font-size:12px; font-weight:600; padding:3px 10px; border-radius:99px; }
+  .quality-badge { display:inline-block; margin-right:6px; padding:2px 8px;
+  border-radius:10px; font-size:12px; }
+.quality-ok { background:#e6f4ea; color:#1e7e34; }
+.quality-unknown { background:#fdf0d5; color:#8a6100; }
+.char-badge { font-size:12px; font-weight:600; padding:3px 10px; border-radius:99px; }
   .char-ok { background:#d1e7dd; color:#0a3622; }
   .char-over { background:#f8d7da; color:#842029; }
 
@@ -232,7 +236,8 @@
   <div class="card">
     <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;">
       <h2 style="margin:0; font-size:15px;">문서 전체</h2>
-      <span id="versionBadge" style="font-size:11px; color:#6e6e73;"></span>
+      <span id="qualityBadge" class="quality-badge"></span>
+        <span id="versionBadge" style="font-size:11px; color:#6e6e73;"></span>
     </div>
     <pre id="fullDocument" style="white-space:pre-wrap; word-break:break-word; font-size:13px;
          line-height:1.8; margin:0; max-height:420px; overflow:auto;"></pre>
@@ -624,6 +629,21 @@ function showResult(question, data) {
   } else {
     warnCard.style.display = 'none';
   }
+
+  // S11-17: 검사 통과 / 검사 실패 / **검사하지 않음** 을 구분해 보여준다.
+  // 토글을 끄고 받은 초안이 검사를 통과한 초안과 같은 얼굴이면 안 된다 (2차 설계검토 4-3).
+  const qb = document.getElementById('qualityBadge');
+  if (data.quality_checked) {
+    qb.textContent = '논지 검토 통과';
+    qb.className = 'quality-badge quality-ok';
+  } else if (data.review_error) {
+    qb.textContent = '논지 검토 실패 — 검사하지 못함';
+    qb.className = 'quality-badge quality-unknown';
+  } else {
+    qb.textContent = '논지 미검토 — 사람이 직접 확인하세요';
+    qb.className = 'quality-badge quality-unknown';
+  }
+  qb.title = data.run_id ? ('실행 기록 ' + data.run_id.slice(0, 8)) : '실행 기록 없음';
 
   // S11-5: 예전엔 saved_to 에서 파일명만 떼어내 서브폴더(기업_직무/)를 잃어버렸다.
   // rel_path 는 /output/<user>/<path:filename> 에 그대로 붙일 수 있는 형태다.

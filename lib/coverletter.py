@@ -23,6 +23,7 @@ from lib import trends as trends_module
 from lib import versions
 from lib.llm import stream_complete
 from lib.resume import _safe_folder_name
+from lib import runs
 from lib.selector import MAX_EXPERIENCES
 from lib.selector import select as select_experiences
 from lib.skills import ContractError, load_frontmatter, load_skill
@@ -1018,6 +1019,7 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
                                  folder_name: Optional[str] = None,
                                  db_path=None,
                                  quality_check: bool = True,
+                                 surface: str = 'script',
                                  complete=None):
     """자소서 한 문항을 생성하고 (event, data) 튜플을 yield 하는 제너레이터.
 
@@ -1349,6 +1351,8 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
             'used_experiences': supplied_filenames,
             'cited_experiences': cited_experiences,
             'plan': plan, 'review': review, 'review_error': review_error, 'repairs': repairs,
+            'quality_checked': bool(quality_check and review is not None and not review_error),
+            'run_id': None,   # 저장하지 않는 호출이라 실행 기록도 남기지 않는다
         }
         return
 
@@ -1389,9 +1393,27 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
     # S11-9: 생성 초안도 버전으로 남긴다. 예전엔 lib/versions.save_version 이
     # web/routes/documents.py 의 수동 편집 저장에서만 불려서, 사람이 한 번 고치기 전까지
     # 이력이 없었다. 설계검토 E-3 의 초안↔최종본 diff 수집은 이 기록이 전제다.
+    # S11-17: 이 초안이 어느 실행에서 나왔는지 함께 남긴다. documents.run_id 가 비어 있으면
+    # 공통 실행기를 거치지 않고 저장된 문서라는 뜻이다 (2차 설계검토 4-1).
+    quality_checked = bool(quality_check and review is not None and not review_error)
+    run_id = runs.new_run_id()
+    try:
+        runs.record(runs.RunRecord(
+            run_id=run_id, user=name, surface=surface, workflow='coverletter.generate',
+            company=company, position=position, question=question,
+            content_hash=runs.content_hash(answer),
+            status=STATUS_REVIEW_REQUIRED if issues else STATUS_READY,
+            issues=list(issues), quality_check=bool(quality_check), reviewed=quality_checked,
+            inputs={'experiences': list(supplied_filenames), 'retries': retries,
+                    'repairs': repairs, 'length_mode': length.mode},
+        ), db_path=db_path)
+    except Exception as e:  # noqa: BLE001
+        yield 'progress', {'stage': 'run_record_failed', 'error': str(e)}
+
     version = None
     try:
-        vr = versions.save_version(out_dir, rel_path, full_document, user=name, db_path=db_path)
+        vr = versions.save_version(out_dir, rel_path, full_document, user=name,
+                                   db_path=db_path, run_id=run_id)
         version = vr.version if vr.ok else None
     except Exception as e:  # noqa: BLE001
         # DB 문제로 **초안을 잃지는 않는다.** 파일은 직접 쓰고 기록 실패만 알린다.
@@ -1431,6 +1453,10 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
         'review': review,
         'review_error': review_error,
         'repairs': repairs,
+        # S11-17: 검사 통과 / 검사 실패 / **검사하지 않음** 을 구분한다. 토글을 끄고 받은
+        # 초안이 검사를 통과한 초안과 같은 얼굴로 보이면 안 된다 (2차 설계검토 4-3).
+        'quality_checked': quality_checked,
+        'run_id': run_id,
     }
 
 
@@ -1441,6 +1467,7 @@ def revise_coverletter_events(user, question: str, exp_dir: Path, *,
                                context: 'CoverletterContext',
                                output_dir: Path,
                                db_path=None,
+                               surface: str = 'script',
                                complete=None):
     """이미 저장된 자소서의 한 문항을 고치고 **문서 전체**를 돌려준다 (S11-13, 설계검토 C-3).
 
@@ -1556,7 +1583,21 @@ def revise_coverletter_events(user, question: str, exp_dir: Path, *,
                    f'{exceeded_note}\n\n{answer}\n\n---\n{meta}\n수정일: {today}\n')
 
     full_document = replace_section(document, question, new_section)
-    vr = versions.save_version(out_dir, rel_path, full_document, user=user, db_path=db_path)
+    # S11-17: 수정도 실행 기록을 남긴다. 수정 경로에는 의미 평가(critic)가 없으므로
+    # reviewed=False 다 — 그 사실이 기록에 그대로 남아야 한다.
+    run_id = runs.new_run_id()
+    try:
+        runs.record(runs.RunRecord(
+            run_id=run_id, user=user, surface=surface, workflow='coverletter.revise',
+            question=question, content_hash=runs.content_hash(answer),
+            status=STATUS_REVIEW_REQUIRED if issues else STATUS_READY,
+            issues=list(issues), quality_check=False, reviewed=False,
+            inputs={'experiences': supplied, 'rel_path': rel_path},
+        ), db_path=db_path)
+    except Exception as e:  # noqa: BLE001
+        yield 'progress', {'stage': 'run_record_failed', 'error': str(e)}
+    vr = versions.save_version(out_dir, rel_path, full_document, user=user,
+                               db_path=db_path, run_id=run_id)
 
     yield 'done', {
         'answer': answer,
@@ -1578,4 +1619,7 @@ def revise_coverletter_events(user, question: str, exp_dir: Path, *,
         'rel_path': rel_path,
         'saved_to': f'outputs/{user}/{rel_path}',
         'version': vr.version if vr.ok else None,
+        # 수정 경로는 결정적 검사만 돈다. 의미 평가는 돌지 않았다는 사실을 숨기지 않는다.
+        'quality_checked': False,
+        'run_id': run_id,
     }

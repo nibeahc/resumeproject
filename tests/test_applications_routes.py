@@ -74,7 +74,9 @@ class ApplicationsRouteTest(unittest.TestCase):
     def test_does_not_touch_real_project_db(self):
         """DB_PATH 격리 회귀 방지: 이 테스트가 실제 data/app.db 를 안 건드리는지 보장한다."""
         self.c.post(f'/applications/홍길동/{self.job_id}/status', json={'status': '준비중'})
-        real_conn = db.get_conn()  # db_path 생략 → 실제 프로젝트 DB
+        # 일부러 기본 경로를 본다 — 실제 DB 가 깨끗한지 확인하는 것이 이 테스트의 목적이다.
+        with db.allow_default_db():
+            real_conn = db.get_conn()
         try:
             count = real_conn.execute(
                 "SELECT COUNT(*) AS n FROM applications WHERE user = '홍길동'"

@@ -169,7 +169,7 @@ def generate(name):
                 override_filenames=override_files,
                 allow_unresearched_company=allow_unresearched,
                 output_dir=output_dir(name), db_path=db_path,
-                quality_check=use_quality_check, complete=stream_complete):
+                quality_check=use_quality_check, surface='web', complete=stream_complete):
             yield sse(event, ev_data)
 
     return Response(stream_with_context(stream()), mimetype='text/event-stream')
@@ -256,7 +256,7 @@ def generate_bundle(name):
                 override_filenames=override_files,
                 allow_unresearched_company=allow_unresearched,
                 output_dir=output_dir(name), folder_name=folder_name,
-                db_path=db_path, quality_check=use_quality_check,
+                db_path=db_path, quality_check=use_quality_check, surface='web',
                 complete=stream_complete):
             tagged = dict(ev_data)
             tagged['doc'] = 'coverletter'
@@ -336,7 +336,8 @@ def revise(name):
         for event, ev_data in revise_coverletter_events(
                 name, question, root / 'experiences',
                 rel_path=rel_path, instruction=instruction, length=length, context=ctx,
-                output_dir=output_dir(name), db_path=db_path, complete=stream_complete):
+                output_dir=output_dir(name), db_path=db_path, surface='web',
+                complete=stream_complete):
             yield sse(event, ev_data)
 
     return Response(stream_with_context(stream()), mimetype='text/event-stream')

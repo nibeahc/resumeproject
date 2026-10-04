@@ -901,7 +901,9 @@ class GenerateBundleTest(unittest.TestCase):
              patch.object(generate_route, 'stream_complete',
                            return_value=llm_result('===ANSWER===\nx\n===END===\n===META===\nx\n===END===\n')):
             self.post().get_data()
-        real_conn = self.db.get_conn()  # db_path 생략 → 실제 프로젝트 DB
+        # 일부러 기본 경로를 본다 — 실제 DB 오염 여부가 이 테스트의 단정 대상이다.
+        with self.db.allow_default_db():
+            real_conn = self.db.get_conn()
         try:
             count = real_conn.execute("SELECT COUNT(*) AS n FROM jobs WHERE company = '테스트기업'").fetchone()['n']
         finally:

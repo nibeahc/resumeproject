@@ -125,7 +125,9 @@ class GenerateWithoutFlaskTest(EngineFixture, unittest.TestCase):
         이 파일을 처음 돌렸을 때 실제로 홍길동 행 3개가 프로젝트 DB 에 들어갔다."""
         from lib import db as real_db
         self.run_events()
-        conn = real_db.get_conn()          # db_path 생략 → 실제 프로젝트 DB
+        # 일부러 기본 경로를 본다 (lib.db.allow_default_db 의 유일한 용도).
+        with real_db.allow_default_db():
+            conn = real_db.get_conn()
         try:
             n = conn.execute("SELECT COUNT(*) AS c FROM documents WHERE user = '홍길동'").fetchone()['c']
         finally:

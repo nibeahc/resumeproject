@@ -57,13 +57,16 @@ class VersionResult:
 
 
 def save_version(user_output_dir: Path, rel_doc_path: str, content: str,
-                  user: str, db_path=None) -> VersionResult:
+                  user: str, db_path=None, run_id=None) -> VersionResult:
     """user_output_dir(=output_dir(name)) 아래 rel_doc_path(예: '기업_직무/이력서.md') 를
     저장하면서 새 버전을 함께 남긴다.
 
     항상 이 함수를 거쳐야 버전이 쌓인다 — 파일을 직접 write_text() 하면 기록 없이 덮어써진다.
     호출 전에 rel_doc_path 의 각 경로 조각은 호출자가 이미 안전성 검사(web.paths.safe_path)를
     끝냈다고 가정한다 — 이 함수 자체는 경로 조작 방어를 하지 않는다(웹 레이어의 책임).
+
+    run_id 는 이 문서를 만든 실행의 식별자다(lib/runs.py). 손으로 저장하면 None 이고,
+    None 이라는 사실 자체가 "공통 실행기를 거치지 않았다" 는 기록이 된다 (S11-17).
     """
     doc_path = user_output_dir / rel_doc_path
     vdir = version_dir(doc_path)
@@ -82,8 +85,9 @@ def save_version(user_output_dir: Path, rel_doc_path: str, content: str,
     conn = db.get_conn(db_path)
     try:
         conn.execute(
-            'INSERT INTO documents (user, job_id, kind, version, path, char_count) VALUES (?,?,?,?,?,?)',
-            (user, None, kind, version, rel_version_path, char_count),
+            'INSERT INTO documents (user, job_id, kind, version, path, char_count, run_id)'
+            ' VALUES (?,?,?,?,?,?,?)',
+            (user, None, kind, version, rel_version_path, char_count, run_id),
         )
         conn.commit()
     finally:
