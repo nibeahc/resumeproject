@@ -22,6 +22,7 @@ users/[이름]/
   index.md          ← 전체 경험 키워드/카테고리 색인
   관심직무.md        ← 관심 직무 목록, 직무별 핵심 키워드·추천 표현·피해야 할 표현
   glossary.md       ← 외부 독자가 모르는 고유명사와 자소서용 설명형 표현
+  마스터이력서.md    ← 모든 경력·프로젝트·교육을 모은 통합 문서 (제출용 아님, 발췌해서 씀)
 
 companies/[기업명].md  ← 기업 정보 캐시 (자소서 작성 시 MCP로 자동 수집·저장)
 
@@ -40,6 +41,7 @@ outputs/[이름]/     ← 사용자별 생성 결과물
 
 - parse-experiences            : users/[이름]/raw/ → users/[이름]/experiences/ 변환 및 태깅
 - elicit-experiences           : raw 파일 없이 대화로 경험 발굴 (콜드 스타트)
+- build-master-resume          : **가장 먼저.** 모든 경력·프로젝트·교육을 한 문서로 (S11-24)
 - plan-document                : 문항을 쓰기 **전에** 문서 전체 소재 배분 (S11-22)
 - write-coverletter            : 자소서 문항 → 문단 작성 (기업 리서치 + 레퍼런스 자동 참조)
 - review-coverletter           : 작성된 초안의 문장별 역할·근거 검토 (S11-10, 별도 호출)
