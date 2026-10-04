@@ -5,11 +5,13 @@ S3-4(elicit)와 같은 이유로 서버 세션을 쓰지 않는다: preview() �
 /jobs/save 에 다시 보낸다. 서버는 그 사이 아무 상태도 기억하지 않는다.
 """
 import json
+import tempfile
+from pathlib import Path
 
 from flask import Blueprint, current_app, jsonify, render_template, request
 
-from lib import db, job_parser
-from web.paths import project_root
+from lib import db, job_parser, jobsource
+from web.paths import project_root, safe_upload_name
 
 bp = Blueprint('jobs', __name__)
 
@@ -76,6 +78,45 @@ def _result_from_json(data: dict) -> job_parser.JobResult:
 @bp.route('/jobs', methods=['GET'])
 def jobs_page():
     return render_template('jobs.html', jobs=_list_jobs())
+
+
+@bp.route('/jobs/fetch', methods=['POST'])
+def jobs_fetch():
+    """S11-16: 공개 URL 한 건에서 공고 본문을 가져온다 (수집 정책의 "조건부 허용").
+
+    가져오기만 하고 파싱은 하지 않는다. 사용자가 본문을 확인한 뒤 기존 preview 로 넘긴다 —
+    잘못 긁힌 내용이 그대로 DB 에 들어가는 것을 막기 위해서다.
+    """
+    data = request.get_json(silent=True) or request.form
+    r = jobsource.fetch_url((data.get('url') or '').strip())
+    if not r.ok:
+        return jsonify(ok=False, error=r.error, reason=r.reason, hint=r.hint), 400
+    return jsonify(ok=True, raw_text=r.text, url=r.url, fetched_at=r.fetched_at, meta=r.meta)
+
+
+@bp.route('/jobs/upload', methods=['POST'])
+def jobs_upload():
+    """S11-16: 공고 파일(PDF 등)에서 본문을 뽑는다 (수집 정책의 "기본 허용").
+
+    URL 수집이 막힌 사이트(잡코리아 등)의 현실적인 대안이다. 브라우저에서 공고를
+    PDF 로 저장해 올리면 lib/extract.py 가 읽는다.
+    """
+    f = request.files.get('file')
+    if not f or not f.filename:
+        return jsonify(ok=False, error='파일을 선택해주세요.'), 400
+    name = safe_upload_name(f.filename)
+    if not name:
+        return jsonify(ok=False, error='파일명을 쓸 수 없습니다.'), 400
+
+    # 업로드 파일은 임시 디렉터리에서만 다룬다. jobs/ 나 users/ 에 남기지 않는다 —
+    # 원문은 preview 를 거쳐 jobs/*.md 로 저장되므로 파일 자체를 보관할 이유가 없다.
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / name
+        f.save(path)
+        r = jobsource.extract_file(path)
+    if not r.ok:
+        return jsonify(ok=False, error=r.error, reason=r.reason, hint=r.hint), 400
+    return jsonify(ok=True, raw_text=r.text, fetched_at=r.fetched_at, meta=r.meta)
 
 
 @bp.route('/jobs/preview', methods=['POST'])

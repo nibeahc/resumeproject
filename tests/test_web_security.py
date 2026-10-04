@@ -41,6 +41,8 @@ EXPECTED_ROUTES = {
     ('/elicit/<name>', 'GET'),
     ('/elicit/<name>', 'POST'),
     ('/jobs', 'GET'),
+    ('/jobs/fetch', 'POST'),
+    ('/jobs/upload', 'POST'),
     ('/jobs/preview', 'POST'),
     ('/jobs/save', 'POST'),
     ('/matches/<name>', 'GET'),

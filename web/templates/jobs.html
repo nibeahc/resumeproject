@@ -22,12 +22,27 @@
 <div class="card">
   <h2 style="margin-bottom:6px;">새 공고 등록</h2>
   <p class="hint">
-    채용 사이트를 직접 열어 가져오지 않습니다 — 원문 URL은 참고용으로만 저장하고,
-    실제 파싱은 아래 붙여넣은 본문만 사용합니다.
+    본문을 채우는 방법은 세 가지입니다 — 직접 붙여넣기, URL 가져오기, 파일 업로드.
+    어느 쪽이든 <strong>파싱 전에 본문을 눈으로 확인</strong>한 뒤 진행합니다.
+    URL 가져오기는 사이트 정책을 확인한 공개 페이지 한 건만 받습니다
+    (<code>Claude.md</code> 외부 자료 수집 정책).
   </p>
 
-  <label class="form-label">원문 URL (선택)</label>
-  <input class="form-input" id="urlInput" type="text" placeholder="https://..." style="margin-bottom:12px;">
+  <label class="form-label">원문 URL</label>
+  <div style="display:flex; gap:8px; margin-bottom:6px;">
+    <input class="form-input" id="urlInput" type="text" placeholder="https://..." style="flex:1;">
+    <button class="btn btn-secondary" id="fetchBtn" onclick="doFetch()">본문 가져오기</button>
+  </div>
+  <p class="hint" style="margin-bottom:12px;">
+    URL 은 가져오지 않아도 기록용으로 저장됩니다. 잡코리아, 사람인처럼 이용약관이 재가공을
+    금지한 사이트는 가져오지 않습니다 — 그 경우 공고를 PDF 로 저장해 아래에서 올려 주세요.
+  </p>
+
+  <label class="form-label">공고 파일 (PDF, DOCX, HWP, HWPX, TXT)</label>
+  <div style="display:flex; gap:8px; margin-bottom:12px; align-items:center;">
+    <input type="file" id="jobFile" accept=".pdf,.docx,.hwp,.hwpx,.txt,.md" style="flex:1; font-size:13px;">
+    <button class="btn btn-secondary" id="uploadBtn" onclick="doUpload()">파일에서 읽기</button>
+  </div>
 
   <label class="form-label">공고 본문 (붙여넣기, 필수)</label>
   <textarea class="form-input" id="rawInput" rows="10"
@@ -130,6 +145,57 @@ function escapeHtml(s) {
 
 function linesToList(text) {
   return text.split('\n').map(s => s.trim()).filter(Boolean);
+}
+
+// S11-16: 가져오기와 업로드는 본문을 채우기만 한다. 파싱은 사용자가 확인한 뒤 누른다.
+function fillRaw(text, label) {
+  document.getElementById('rawInput').value = text;
+  toast(`${label} — ${text.length}자를 읽었습니다. 내용을 확인한 뒤 파싱하세요.`, 4000);
+}
+
+async function doFetch() {
+  const url = document.getElementById('urlInput').value.trim();
+  if (!url) { toast('URL 을 입력해주세요.'); return; }
+  const btn = document.getElementById('fetchBtn');
+  btn.disabled = true; btn.textContent = '가져오는 중...';
+  try {
+    const res = await fetch('/jobs/fetch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      toast('⚠️ ' + data.error + (data.hint ? '\n' + data.hint : ''), 7000);
+      return;
+    }
+    fillRaw(data.raw_text, 'URL 에서 가져왔습니다');
+  } catch (e) {
+    toast('가져오는 중 오류가 발생했습니다: ' + e.message, 4000);
+  } finally {
+    btn.disabled = false; btn.textContent = '본문 가져오기';
+  }
+}
+
+async function doUpload() {
+  const input = document.getElementById('jobFile');
+  if (!input.files || !input.files[0]) { toast('파일을 선택해주세요.'); return; }
+  const btn = document.getElementById('uploadBtn');
+  btn.disabled = true; btn.textContent = '읽는 중...';
+  try {
+    const form = new FormData();
+    form.append('file', input.files[0]);
+    const res = await fetch('/jobs/upload', { method: 'POST', body: form });
+    const data = await res.json();
+    if (!data.ok) {
+      toast('⚠️ ' + data.error + (data.hint ? '\n' + data.hint : ''), 7000);
+      return;
+    }
+    fillRaw(data.raw_text, `${input.files[0].name} 에서 읽었습니다`);
+  } catch (e) {
+    toast('파일을 읽는 중 오류가 발생했습니다: ' + e.message, 4000);
+  } finally {
+    btn.disabled = false; btn.textContent = '파일에서 읽기';
+  }
 }
 
 async function doPreview() {
