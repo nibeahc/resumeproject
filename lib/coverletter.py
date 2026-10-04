@@ -33,6 +33,7 @@ _PLAN_BLOCK = re.compile(r'===PLAN===\n(?P<body>.*?)\n===END===', re.S)
 _REVIEW_BLOCK = re.compile(r'===REVIEW===\n(?P<body>.*?)\n===END===', re.S)
 _ANSWER_BLOCK = re.compile(r'===ANSWER===\n(?P<body>.*?)\n===END===', re.S)
 _META_BLOCK = re.compile(r'===META===\n(?P<body>.*?)\n===END===', re.S)
+_EVIDENCE_BLOCK = re.compile(r'===EVIDENCE===\n(?P<body>.*?)\n===END===', re.S)
 
 # ---------------------------------------------------------------------------
 # 정책 (S11-15, 설계검토 A-3)
@@ -55,6 +56,7 @@ _CONTRACT_SCHEMA = {
     'preconditions': {'company_evidence': str},
     'experience_policy': {'default_count': int, 'max_count': int,
                            'second_experience_requires_shared_claim': bool},
+    'evidence_policy': {'require_quote': bool, 'max_quote_chars': int},
     'company_evidence_policy': {'max_age_days': int, 'require_source_url': bool},
     'length_policy': {'max_chars': int, 'tolerance_pct': int},
     'retry_policy': {'max_length_retries': int, 'max_repair_rounds': int},
@@ -103,6 +105,8 @@ LENGTH_TOLERANCE = POLICY['length_policy']['tolerance_pct'] / 100
 COMPANY_EVIDENCE_MAX_AGE_DAYS = POLICY['company_evidence_policy']['max_age_days']
 COMPANY_EVIDENCE_REQUIRED = POLICY['preconditions']['company_evidence'] == 'required'
 MAX_EXPERIENCES_BY_CONTRACT = POLICY['experience_policy']['max_count']
+EVIDENCE_REQUIRED = POLICY['evidence_policy']['require_quote']
+MAX_QUOTE_CHARS = POLICY['evidence_policy']['max_quote_chars']
 
 # 계약에 넣지 않은 값: 구현 세부사항이라 정책이 아니다.
 TARGET_UNDERSHOOT = 20    # 재시도 목표를 상한에 붙이지 않고 이만큼 아래로 둔다 (미세 오차 대비)
@@ -140,6 +144,13 @@ ISSUE_PLAN_MISSING_WARRANT = 'plan_missing_warrant'  # S11-14
 # 지원자가 그 일을 했다는 뜻이 아니다 (2차 설계검토 3-1).
 ISSUE_FACT_FROM_JD_ONLY = 'fact_from_jd_only'
 ISSUE_JD_TERM_UNSUPPORTED = 'jd_term_unsupported'
+# S11-19: 근거 구간. 주장마다 경험 원문의 인용을 받아 코드가 대조한다
+# (2차 설계검토 3-2).
+ISSUE_EVIDENCE_MISSING = 'evidence_missing'
+ISSUE_EVIDENCE_QUOTE_NOT_FOUND = 'evidence_quote_not_found'
+ISSUE_EVIDENCE_UNKNOWN_FILE = 'evidence_unknown_file'
+ISSUE_EVIDENCE_BAD_SENTENCE = 'evidence_bad_sentence'
+ISSUE_EVIDENCE_UNCOVERED = 'evidence_uncovered_claim'
 
 
 
@@ -293,6 +304,23 @@ def build_prompt(name, company, position, question, length: 'LengthSpec',
 
 '''
 
+    # S11-19: 사실 주장마다 **경험 원문에서 그대로 옮긴 인용**을 받는다. 코드가 그 구절이
+    # 원본에 실제로 있는지 대조한다 (2차 설계검토 3-2). 추가 호출은 없다 — PLAN 과 같은
+    # 응답 안에서 받는다. 관계가 충분한지는 여기서 묻지 않는다(검토 호출의 몫).
+    evidence_block = '' if not want_plan else f'''
+===EVIDENCE===
+(ANSWER 의 문장 중 **본인이 과거에 한 일을 말하는 문장**마다 한 줄. 파이프로 구분한 6칸)
+주장id | 문장번호 | 주장 요약 | 유형(action/result/impact) | 근거 경험 파일명 | 그 파일에서 그대로 옮긴 구절
+예시: c1 | s3 | 일일 보고서를 작성했다 | action | 2026-인턴십.md | 일일 보고서를 작성하여 팀에 공유하였다
+
+- 문장번호는 ANSWER 를 마침표 기준으로 센 순서입니다 (첫 문장이 s1).
+- 마지막 칸은 **경험 파일에 적힌 글자 그대로** 옮기세요. 요약하거나 바꿔 쓰면 안 됩니다.
+  코드가 원문과 대조하므로 한 글자라도 다르면 근거 없음으로 처리됩니다. {MAX_QUOTE_CHARS}자 이내.
+- 원문에 그런 구절이 **없으면 그 문장을 ANSWER 에서 빼세요.** 근거를 지어내지 마세요.
+- 미래 계획("~하겠습니다")과 지원 동기는 사실 주장이 아니므로 적지 않습니다.
+===END===
+'''
+
     # S11-3: 제한이 있을 때와 없을 때는 요구가 정반대다. 전자는 "넘기지 마라",
     # 후자는 "짧게 끝내지 마라, 다만 경험을 더 늘리지도 마라" 다.
     if length.bounded:
@@ -390,7 +418,7 @@ Step 2, Step 4 는 아래 안내를 따르세요. Step 9(출력 형식), Step 10
 참조한 레퍼런스: [파일명 또는 "없음"]
 오래된 경험 사용 여부: [예/아니오]
 ===END===
-"""
+{evidence_block}"""
 
 
 def build_retry_prompt(length: 'LengthSpec', current_count, company=''):
@@ -567,6 +595,27 @@ def _as_sources(sources) -> List[Source]:
 _PAST_SELF_ACTION = re.compile(
     r'(했|하였|맡았|받았|만들었|썼|배웠|익혔|다뤘|다루었|얻었|냈|이루었|이뤘)습니다')
 _FUTURE_OR_INTENT = re.compile(r'(겠습니다|고 싶습니다|하려 합니다|할 것입니다|예정입니다|싶습니다)')
+
+
+# 근거가 필요한 문장은 "내가 한 일" 보다 넓다. **영향 주장**("보고서가 기준이 되었습니다")
+# 은 주어가 내가 아니지만 가장 지어내기 쉬운 종류다 — 실제로 2026-10-04 에 잡힌 거짓 주장이
+# 정확히 이 형태였다. 그래서 커버리지 검사는 과거형 서술 전체를 본다.
+# '했' 은 '하였' 의 축약이라 '었/였' 글자를 담지 않는다. 따로 넣어야 한다.
+_PAST_DECLARATIVE = re.compile(r'(았|었|였|했)습니다')
+# 지원 동기는 사실 주장이 아니다. "지원하게 되었습니다" 류를 뺀다.
+_MOTIVE = re.compile(r'(지원|결정|선택)(하게 |해 |을 |를 )?(되었|했)습니다')
+# 명사절에 붙은 계사는 해석이지 사실 주장이 아니다 — "~하기 위해서였습니다",
+# "가장 자주 틀리는 지점이었습니다", "배운 것은 ~라는 점이었습니다".
+# (실제 자소서에 커버리지 검사를 돌려 발견한 오탐 패턴이다.)
+_REFLECTION = re.compile(r'(것|점|이유|때문|지점|까닭|위해서|셈)(이었|였|었)습니다')
+
+
+def needs_evidence(sentence: str) -> bool:
+    """이 문장이 근거를 대야 하는 사실 주장인가 (S11-19 커버리지 검사용)."""
+    if (_FUTURE_OR_INTENT.search(sentence) or _MOTIVE.search(sentence)
+            or _REFLECTION.search(sentence)):
+        return False
+    return bool(_PAST_DECLARATIVE.search(sentence))
 
 
 def is_self_claim(sentence: str) -> bool:
@@ -996,6 +1045,98 @@ def lint_plan(plan: List[dict], supplied_filenames) -> List[str]:
     return issues
 
 
+def parse_evidence(text: str) -> List[dict]:
+    """===EVIDENCE=== 블록을 파싱한다 (S11-19, 2차 설계검토 3-2).
+
+    형식을 안 지켜도 예외를 내지 않는다 — 근거를 못 댔다는 사실 자체가 판정 대상이다.
+    """
+    m = _EVIDENCE_BLOCK.search(text or '')
+    if not m:
+        return []
+    rows = []
+    for line in m.group('body').split('\n'):
+        line = line.strip()
+        if not line or line.startswith('(') or line.startswith('예시'):
+            continue
+        cells = [c.strip() for c in line.split('|')]
+        if len(cells) < 5 or cells[0].startswith('주장id'):
+            continue
+
+        def cell(i):
+            v = cells[i].strip() if len(cells) > i else ''
+            return '' if v in ('-', '—', 'N/A') else v
+
+        sent = cell(1).lower().lstrip('s')
+        rows.append({
+            'id': cells[0],
+            'sentence': int(sent) if sent.isdigit() else None,
+            'claim': cell(2),
+            'claim_type': cell(3),
+            'file': (_MD_FILENAME.findall(cell(4)) or [cell(4)])[0],
+            'quote': cell(5),
+        })
+    return rows
+
+
+def _flat(s: str) -> str:
+    return re.sub(r'\s+', '', s or '')
+
+
+def lint_evidence(rows: List[dict], answer: str, experience_texts: dict) -> List[str]:
+    """**코드가 인용문을 원본과 대조한다.** 검토 3-2 의 3단계가 이것이다.
+
+    모델이 "이 주장은 저 파일의 이 구절이 근거다" 라고 말하면, 그 구절이 그 파일에
+    실제로 있는지는 코드가 확인할 수 있다. 모델의 자기보고를 믿지 않는다
+    (lib/matcher.py 의 _validate_evidence 와 같은 원칙).
+
+    주장과 근거의 **관계가 충분한지**는 여기서 판정하지 않는다 — 그건 의미 판단이고
+    skills/review-coverletter.md 의 검토 호출이 맡는다. 여기서는 인용이 실재하는지만 본다.
+    """
+    issues = []
+    sentences = split_sentences(answer)
+    # 근거가 필요한 문장이 애초에 없으면 빈 블록이 정답이다. 지원 동기와 포부만 있는
+    # 문항에 "근거를 안 댔다" 고 하면 오탐이다 (검토 3-2: 모든 문장이 사실 주장은 아니다).
+    needs = [i for i, s in enumerate(sentences, 1) if needs_evidence(s)]
+    if not rows:
+        return [ISSUE_EVIDENCE_MISSING] if needs else []
+
+    for row in rows:
+        if not row['sentence'] or not (1 <= row['sentence'] <= len(sentences)):
+            if ISSUE_EVIDENCE_BAD_SENTENCE not in issues:
+                issues.append(ISSUE_EVIDENCE_BAD_SENTENCE)
+        src = experience_texts.get(row['file'])
+        if src is None:
+            if ISSUE_EVIDENCE_UNKNOWN_FILE not in issues:
+                issues.append(ISSUE_EVIDENCE_UNKNOWN_FILE)
+            continue
+        quote = _flat(row['quote'])
+        # 빈 인용이나 원문에 없는 인용은 근거가 아니다.
+        if not quote or quote not in _flat(src):
+            if ISSUE_EVIDENCE_QUOTE_NOT_FOUND not in issues:
+                issues.append(ISSUE_EVIDENCE_QUOTE_NOT_FOUND)
+
+    # 커버리지: 본인이 했다고 쓴 문장 중 근거 행이 없는 것 (S11-18 의 is_self_claim 재사용).
+    covered = {r['sentence'] for r in rows if r['sentence']}
+    if [i for i in needs if i not in covered]:
+        issues.append(ISSUE_EVIDENCE_UNCOVERED)
+    return issues
+
+
+def evidence_report(rows: List[dict], experience_texts: dict) -> List[dict]:
+    """화면과 실행 기록에 남길 주장별 대조 결과. verdict 는 인용의 실재 여부만 말한다."""
+    out = []
+    for row in rows:
+        src = experience_texts.get(row['file'])
+        if src is None:
+            verdict = 'unknown_file'
+        elif row['quote'] and _flat(row['quote']) in _flat(src):
+            verdict = 'quote_found'
+        else:
+            verdict = 'quote_not_found'
+        out.append({**row, 'verdict': verdict})
+    return out
+
+
 def build_review_input(question: str, draft: str, *, job_text: str = '',
                         company_text: str = '', allowed_experiences=()) -> str:
     """검토 호출의 입력. **계획(PLAN)은 넣지 않는다** — 설계검토 B-2 의 요지대로
@@ -1082,7 +1223,7 @@ def build_repair_prompt(review: dict, draft: str, allowed_filenames) -> str:
 - 근거가 없어서 주장을 받칠 수 없다면, 형용사를 늘리지 말고 그 주장을 빼세요.
 - 글자수 조건과 문체 규칙은 그대로 유지합니다.
 
-같은 형식(===PLAN=== / ===ANSWER=== / ===META===)으로 전체를 다시 돌려주세요.
+같은 형식(===PLAN=== / ===ANSWER=== / ===META=== / ===EVIDENCE===)으로 전체를 다시 돌려주세요.
 """
 
 
@@ -1445,6 +1586,13 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
         if unsupported_terms:
             found.append(ISSUE_JD_TERM_UNSUPPORTED)
 
+        # S11-19: 주장마다 받은 인용 구절이 경험 원문에 실제로 있는지 코드가 대조한다.
+        exp_by_name = dict(selected_experiences)
+        ev_rows = parse_evidence(raw_text)
+        if quality_check and EVIDENCE_REQUIRED:
+            found.extend(lint_evidence(ev_rows, answer_text, exp_by_name))
+        ev_report = evidence_report(ev_rows, exp_by_name)
+
         # S11-11: 코드로 판정 가능한 개인 규칙(현재는 가운뎃점 금지). 예전엔
         # writing-rules.md 에 적혀 있어도 프롬프트에만 맡겨져 있었다.
         broken = check_personal_rules(answer_text, ctx.rules_text)
@@ -1456,11 +1604,12 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
         if unexplained:
             found.append(ISSUE_UNEXPLAINED_NAME)
         return (found, n, over, plan_rows, cited_, unknown_, nums, orgs, broken,
-                unexplained, jd_only, unsupported_terms)
+                unexplained, jd_only, unsupported_terms, ev_report)
 
     (det, actual, exceeded, plan, cited_experiences, unknown_cited,
      unverified_numbers, unverified_orgs, broken_rules, unexplained_names,
-     jd_only_facts, jd_terms_unsupported) = deterministic_check(result['text'], answer, meta)
+     jd_only_facts, jd_terms_unsupported,
+     evidence) = deterministic_check(result['text'], answer, meta)
     if jd_only_facts or jd_terms_unsupported:
         yield 'progress', {'stage': 'jd_scope', 'facts': jd_only_facts,
                             'terms': jd_terms_unsupported}
@@ -1518,7 +1667,7 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
                     if new_answer:
                         (new_det, n2, over2, plan2, cited2, unknown2,
                          nums2, orgs2, broken2, unexplained2,
-                         jd2, terms2) = deterministic_check(
+                         jd2, terms2, ev2) = deterministic_check(
                             repaired['text'], new_answer, new_meta)
                         # 검토 지적을 고치면서 글자수나 사실이 틀어졌다면 수정본을 버린다.
                         worse = set(new_det) - set(det)
@@ -1532,6 +1681,7 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
                             unverified_numbers, unverified_orgs = nums2, orgs2
                             broken_rules, unexplained_names = broken2, unexplained2
                             jd_only_facts, jd_terms_unsupported = jd2, terms2
+                            evidence = ev2
                     else:
                         yield 'progress', {'stage': 'repair_failed', 'error': 'ANSWER 블록 없음'}
             # 수정 후에도(또는 수정 없이) 남은 차단성 지적은 사람에게 넘긴다.
@@ -1561,6 +1711,7 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
             'cited_experiences': cited_experiences,
             'plan': plan, 'review': review, 'review_error': review_error, 'repairs': repairs,
             'jd_only_facts': jd_only_facts, 'jd_terms_unsupported': jd_terms_unsupported,
+            'evidence': evidence,
             'quality_checked': bool(quality_check and review is not None and not review_error),
             'run_id': None,   # 저장하지 않는 호출이라 실행 기록도 남기지 않는다
         }
@@ -1615,7 +1766,10 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
             status=STATUS_REVIEW_REQUIRED if issues else STATUS_READY,
             issues=list(issues), quality_check=bool(quality_check), reviewed=quality_checked,
             inputs={'experiences': list(supplied_filenames), 'retries': retries,
-                    'repairs': repairs, 'length_mode': length.mode},
+                    'repairs': repairs, 'length_mode': length.mode,
+                    'evidence_quotes_found': sum(1 for e in evidence
+                                                  if e['verdict'] == 'quote_found'),
+                    'evidence_rows': len(evidence)},
         ), db_path=db_path)
     except Exception as e:  # noqa: BLE001
         yield 'progress', {'stage': 'run_record_failed', 'error': str(e)}
@@ -1663,6 +1817,8 @@ def generate_coverletter_events(user, question, exp_dir: Path, *,
         # S11-18: 어딘가에는 있지만 본인 경험에는 근거가 없는 것
         'jd_only_facts': jd_only_facts,
         'jd_terms_unsupported': jd_terms_unsupported,
+        # S11-19: 주장별 근거 대조 결과. verdict 는 "그 인용이 원문에 있는가" 만 말한다.
+        'evidence': evidence,
         'review': review,
         'review_error': review_error,
         'repairs': repairs,

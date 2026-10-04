@@ -16,6 +16,13 @@ experience_policy:
   # 두 번째 경험은 같은 주장을 보강/대조/변화로 받칠 때만. 근거를 못 적으면 린터가 잡는다
   second_experience_requires_shared_claim: true
 
+evidence_policy:
+  # 사실 주장마다 경험 원문에서 그대로 옮긴 인용 구절을 요구한다 (S11-19).
+  # 코드가 그 인용문이 원본에 실제로 있는지 대조한다 — 모델의 자기보고를 믿지 않는다.
+  require_quote: true
+  # 인용은 짧게. 길면 통째로 복사해 놓고 근거라고 우기기 쉽다
+  max_quote_chars: 120
+
 company_evidence_policy:
   # 확인일이 이보다 오래되면 알린다 (막지는 않는다)
   max_age_days: 90

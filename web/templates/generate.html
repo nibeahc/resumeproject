@@ -31,7 +31,14 @@
   .answer-text { white-space:pre-wrap; line-height:1.8; font-size:14px; }
   .meta-text { white-space:pre-wrap; font-size:12px; color:#6e6e73; line-height:1.8; margin-top:14px;
                padding-top:14px; border-top:1px solid #f0f0f5; }
-  .quality-badge { display:inline-block; margin-right:6px; padding:2px 8px;
+  .ev-box { margin:10px 0; font-size:13px; }
+.ev-title { font-weight:600; margin-bottom:4px; }
+.ev-row { padding:4px 8px; border-left:3px solid #ccc; margin-bottom:4px; }
+.ev-ok { border-left-color:#1e7e34; }
+.ev-bad { border-left-color:#c0392b; background:#fdecea; }
+.ev-mark { font-weight:600; }
+.ev-src { color:#666; font-size:12px; margin-top:2px; }
+.quality-badge { display:inline-block; margin-right:6px; padding:2px 8px;
   border-radius:10px; font-size:12px; }
 .quality-ok { background:#e6f4ea; color:#1e7e34; }
 .quality-unknown { background:#fdf0d5; color:#8a6100; }
@@ -237,6 +244,7 @@
     <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;">
       <h2 style="margin:0; font-size:15px;">문서 전체</h2>
       <span id="qualityBadge" class="quality-badge"></span>
+        <div id="evidenceBox" class="ev-box" style="display:none"></div>
         <span id="versionBadge" style="font-size:11px; color:#6e6e73;"></span>
     </div>
     <pre id="fullDocument" style="white-space:pre-wrap; word-break:break-word; font-size:13px;
@@ -574,6 +582,12 @@ const ISSUE_LABELS = {
   // 지원자가 그 일을 했다는 뜻이 아니다.
   fact_from_jd_only: '본인이 했다고 쓴 문장의 수치·기관명이 경험이 아니라 공고나 기업 자료에만 있음',
   jd_term_unsupported: '공고에 적힌 도구를 써 봤다고 했는데 경험 파일에 근거가 없음',
+  // S11-19: 주장마다 받은 인용을 코드가 경험 원문과 대조한 결과
+  evidence_missing: '본인이 한 일을 쓰면서 근거 인용을 대지 않음',
+  evidence_quote_not_found: '근거로 제시한 인용이 경험 원문에 없음 (지어낸 근거일 수 있음)',
+  evidence_unknown_file: '근거가 제공되지 않은 경험 파일을 가리킴',
+  evidence_bad_sentence: '근거가 가리키는 문장 번호가 초안에 없음',
+  evidence_uncovered_claim: '본인이 했다고 쓴 문장 중 근거를 대지 않은 것이 있음',
 };
 
 function issueLabel(code, data) {
@@ -632,6 +646,25 @@ function showResult(question, data) {
       '⚠️ 확인이 필요합니다 — ' + issues.map(code => issueLabel(code, data)).join(' / ');
   } else {
     warnCard.style.display = 'none';
+  }
+
+  // S11-19: 주장별 근거 대조 결과를 그대로 보여준다. 인용이 원문에 없으면
+  // 그 주장은 사람이 확인해야 한다 (2차 설계검토 3-2).
+  const evBox = document.getElementById('evidenceBox');
+  const ev = data.evidence || [];
+  if (ev.length) {
+    evBox.style.display = '';
+    evBox.innerHTML = '<div class="ev-title">주장별 근거 대조</div>' + ev.map(function (e) {
+      const ok = e.verdict === 'quote_found';
+      return '<div class="ev-row ' + (ok ? 'ev-ok' : 'ev-bad') + '">'
+        + '<span class="ev-mark">' + (ok ? '확인' : '없음') + '</span> '
+        + escapeHtml(e.claim || '')
+        + '<div class="ev-src">' + escapeHtml(e.file || '') + ' — '
+        + (ok ? '“' + escapeHtml(e.quote || '') + '”'
+              : '제시한 인용이 원문에 없습니다') + '</div></div>';
+    }).join('');
+  } else {
+    evBox.style.display = 'none';
   }
 
   // S11-17: 검사 통과 / 검사 실패 / **검사하지 않음** 을 구분해 보여준다.
