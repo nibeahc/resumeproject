@@ -140,16 +140,28 @@
 </div>
 
 <!-- 자소서 결과물 -->
+<!-- 사용자 요청(2026-10-06): "항목은 건별로 하나만". 예전엔 폴더 안의 .md 를 전부 나열해서
+     한 지원 건이 자소서·근거표·이력서·포트폴리오까지 네댓 줄로 흩어졌다. 이제 지원 건 하나가
+     한 줄이고, 들어가면 초안과 최종본이 한 페이지에 있다 (web/templates/case.html). -->
 <div id="tab-outputs" style="display:none;">
   {% if outputs %}
   <div class="card" style="padding:0; overflow:hidden;">
     <table>
-      <thead><tr><th>파일명</th><th></th></tr></thead>
+      <thead><tr><th>지원 건</th><th style="width:130px;">상태</th><th style="width:120px;">수정</th></tr></thead>
       <tbody>
         {% for o in outputs %}
-        <tr>
-          <td style="font-weight:500;">{{ o.filename }}</td>
-          <td><a href="/output/{{ user }}/{{ o.filename }}" class="btn btn-secondary btn-sm">열기 / 편집</a></td>
+        <tr class="row-link" onclick="location.href='{{ o.url }}'">
+          <td style="font-weight:500; word-break:keep-all; overflow-wrap:break-word;">
+            <a href="{{ o.url }}">{{ o.title }}</a>
+          </td>
+          <td>
+            {% if o.has_final %}
+            <span class="badge badge-ok">최종본</span>
+            {% else %}
+            <span class="badge badge-warn">초안만</span>
+            {% endif %}
+          </td>
+          <td class="muted mono" style="white-space:nowrap;">{{ o.updated }}</td>
         </tr>
         {% endfor %}
       </tbody>

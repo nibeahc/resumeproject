@@ -280,7 +280,7 @@
          line-height:1.8; margin:0; max-height:420px; overflow:auto;"></pre>
   </div>
   <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
-    <a href="#" id="savedLink" class="btn btn-secondary">저장된 파일 열기 / 편집 →</a>
+    <a href="#" id="savedLink" class="btn btn-secondary">이 지원 건 열기 (초안 / 최종본) →</a>
     <button class="btn btn-secondary" onclick="resetForm()">다른 문항 작성</button>
   </div>
 </div>
@@ -680,6 +680,14 @@ function outputUrl(relPath) {
   return `/output/{{ user }}/` + parts.join('/');
 }
 
+// 결과물은 이제 지원 건 단위로 본다 (한 건 = 한 페이지, 위가 초안 아래가 최종본).
+// rel_path 는 '기업_직무/자소서.md' 라서 첫 조각이 곧 지원 건 폴더다.
+function caseUrl(relPath) {
+  const parts = String(relPath || '').split('/').filter(Boolean);
+  if (parts.length < 2) return outputUrl(relPath);   // 옛 평평한 구조는 파일 하나가 한 건이다
+  return `/case/{{ user }}/` + encodeURIComponent(parts[0]);
+}
+
 const ISSUE_LABELS = {
   over_limit: '글자수 제한 초과',
   undershoot: '목표 글자수보다 많이 모자람',
@@ -821,7 +829,9 @@ function showResult(question, data) {
 
   // S11-5: 예전엔 saved_to 에서 파일명만 떼어내 서브폴더(기업_직무/)를 잃어버렸다.
   // rel_path 는 /output/<user>/<path:filename> 에 그대로 붙일 수 있는 형태다.
-  document.getElementById('savedLink').href = outputUrl(data.rel_path || data.saved_to);
+  // saved_to 는 'outputs/<user>/...' 라서 건 폴더를 뽑을 수 없다 — 그때만 파일로 직접 간다.
+  document.getElementById('savedLink').href =
+    data.rel_path ? caseUrl(data.rel_path) : outputUrl(data.saved_to);
 
   // S11-13: 전체 문서를 항상 보여준다.
   lastRelPath = data.rel_path || '';

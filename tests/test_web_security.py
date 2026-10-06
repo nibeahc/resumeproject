@@ -4,6 +4,7 @@
 실제 users/, outputs/ 는 건드리지 않고 임시 디렉터리를 PROJECT_ROOT 로 주입한다.
 """
 import io
+import json
 import shutil
 import sys
 import tempfile
@@ -28,6 +29,9 @@ EXPECTED_ROUTES = {
     ('/output/<name>/<path:filename>/versions', 'GET'),
     ('/output/<name>/<path:filename>/diff', 'GET'),
     ('/output/<name>/<path:filename>/docx', 'GET'),
+    # 2026-10-06 사용자 요청: 결과물은 지원 건 단위로 본다 (한 건 = 한 페이지, 초안 위 최종본 아래)
+    ('/case/<name>/<folder>', 'GET'),
+    ('/case/<name>/<folder>/final', 'POST'),
     ('/experience/<name>/<filename>', 'GET'),
     ('/experience/<name>/<filename>/save', 'POST'),
     ('/experience/<name>/<filename>/delete', 'POST'),
@@ -178,6 +182,63 @@ class RouteStructureTest(WebTestBase):
         r = self.c.post('/experience/홍길동/a.md/save', json={'content': '수정됨'})
         self.assertEqual(r.get_json(), {'success': True})
         self.assertEqual((self.root / 'users' / '홍길동' / 'experiences' / 'a.md').read_text(encoding='utf-8'), '수정됨')
+
+
+class CaseViewTest(WebTestBase):
+    """지원 건 화면 (2026-10-06 사용자 요청).
+
+    "항목은 건별로 하나만, 한 페이지에 초안이 먼저 들어가고 최종본은 그 아래." 목록이
+    폴더 안의 파일을 전부 나열하던 때로 돌아가지 않게 여기서 못을 박는다.
+    """
+
+    def test_case_page_shows_draft_then_final_slot(self):
+        r = self.c.get('/case/홍길동/테스트기업_직무')
+        self.assertEqual(r.status_code, 200)
+        body = r.get_data(as_text=True)
+        # 본문은 editor.html 과 같은 방식으로 |tojson 을 거쳐 스크립트에 실려 간다
+        # (한글이 \uXXXX 로 이스케이프되므로 json.dumps 와 비교한다).
+        self.assertIn(json.dumps('서브폴더 본문'), body)
+        self.assertIn('자소서.md', body)
+        self.assertIn('초안만 있음', body)
+        self.assertLess(body.index('① 초안'), body.index('② 최종본'))
+
+    def test_missing_case_returns_404(self):
+        self.assertEqual(self.c.get('/case/홍길동/없는건').status_code, 404)
+
+    def test_case_traversal_rejected(self):
+        self.assertEqual(self.c.get('/case/홍길동/..').status_code, 400)
+        self.assertEqual(self.c.post('/case/홍길동/../final').status_code, 400)
+        self.assertEqual((self.tmp / 'secret.md').read_text(encoding='utf-8'), 'SECRET')
+
+    def test_make_final_copies_draft_and_leaves_a_version(self):
+        r = self.c.post('/case/홍길동/테스트기업_직무/final')
+        self.assertTrue(r.get_json()['success'])
+        case_dir = self.root / 'outputs' / '홍길동' / '테스트기업_직무'
+        self.assertEqual((case_dir / '최종본.md').read_text(encoding='utf-8'), '서브폴더 본문')
+        # Claude.md: 생성·수정 결과를 실행 기록 없이 저장하지 않는다 — save_version 을 거친다
+        self.assertTrue((case_dir / '최종본' / 'v1.md').exists())
+
+    def test_make_final_twice_rejected(self):
+        self.c.post('/case/홍길동/테스트기업_직무/final')
+        r = self.c.post('/case/홍길동/테스트기업_직무/final')
+        self.assertEqual(r.status_code, 400)
+        self.assertFalse(r.get_json()['success'])
+
+    def test_final_shows_under_draft_once_written(self):
+        self.c.post('/case/홍길동/테스트기업_직무/final')
+        body = self.c.get('/case/홍길동/테스트기업_직무').get_data(as_text=True)
+        self.assertIn('최종본 있음', body)
+        self.assertLess(body.index('① 초안'), body.index('② 최종본'))
+
+    def test_outputs_tab_lists_one_row_per_case(self):
+        """근거표 같은 부속 파일이 목록에 따로 뜨면 안 된다 (사용자 요청)."""
+        case_dir = self.root / 'outputs' / '홍길동' / '테스트기업_직무'
+        (case_dir / '근거표.md').write_text('근거', encoding='utf-8')
+        (case_dir / '이력서.md').write_text('이력', encoding='utf-8')
+        body = self.c.get('/user/홍길동').get_data(as_text=True)
+        self.assertIn('자소서 결과물 (2)', body)          # 서브폴더 1건 + 옛 평평한 파일 x.md 1건
+        self.assertNotIn('테스트기업_직무/근거표.md', body)
+        self.assertIn('/case/%ED%99%8D%EA%B8%B8%EB%8F%99/', body)
 
 
 class ExperienceDeleteAndCreateTest(WebTestBase):

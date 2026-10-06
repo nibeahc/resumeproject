@@ -8,6 +8,7 @@ from pathlib import Path
 from flask import Blueprint, abort, current_app, jsonify, render_template, request, send_file
 
 from lib import db, export, versions
+from web.data import build_case
 from web.paths import (ALLOWED_EXT, output_dir, project_root, safe_path, safe_upload_name,
                        trash_dir, user_dir, valid_segment)
 
@@ -147,6 +148,43 @@ def download_output_docx(name, filename):
     download_name = f'{Path(filename).stem}.docx'
     return send_file(buf, as_attachment=True, download_name=download_name,
                      mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+
+
+@bp.route('/case/<name>/<folder>')
+def view_case(name, folder):
+    """지원 건 하나를 한 페이지로 본다 (사용자 요청, 2026-10-06).
+
+    "항목은 건별로 하나만, 한 페이지에 초안이 먼저 오고 그 아래에 최종본." 그래서 폴더
+    안의 파일을 따로따로 열던 목록 대신 이 화면이 지원 건의 입구가 된다. 초안은 읽기
+    전용으로 보여주고(고치려면 기존 편집 화면으로 간다), 최종본은 여기서 바로 고친다.
+    """
+    safe_path(project_root() / 'outputs', name, folder)
+    case = build_case(name, folder)
+    if case is None:
+        return '지원 건을 찾을 수 없습니다.', 404
+    return render_template('case.html', user=name, case=case)
+
+
+@bp.route('/case/<name>/<folder>/final', methods=['POST'])
+def create_final(name, folder):
+    """초안을 그대로 복사해 최종본.md 를 만든다.
+
+    빈 문서가 아니라 복사본으로 시작한다 — 최종본은 초안을 퇴고해서 나오는 것이지
+    처음부터 다시 쓰는 글이 아니다. 직접 write_text 하지 않고 save_version 을 거친다
+    (Claude.md "실행 기록 없이 저장하지 않는다"). 손으로 만든 것이므로 run_id 는 없다.
+    """
+    safe_path(project_root() / 'outputs', name, folder)
+    case = build_case(name, folder)
+    if case is None:
+        return jsonify(success=False, error='지원 건을 찾을 수 없습니다.'), 404
+    if case['final']:
+        return jsonify(success=False, error='이미 최종본이 있습니다.'), 400
+    if not case['draft']:
+        return jsonify(success=False, error='복사할 초안이 없습니다.'), 400
+
+    result = versions.save_version(output_dir(name), case['final_filename'],
+                                   case['draft']['content'], name, db_path=_db_path())
+    return jsonify(success=True, version=result.version, filename=case['final_filename'])
 
 
 @bp.route('/experience/<name>/<filename>')

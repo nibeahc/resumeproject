@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from web import create_app  # noqa: E402
-from web.data import _start_date_key, get_experiences  # noqa: E402
+from web.data import _start_date_key, get_experiences, get_outputs  # noqa: E402
 
 
 def write_experience(exp_dir, filename, title, date):
@@ -60,3 +60,69 @@ class GetExperiencesOrderTest(unittest.TestCase):
     def test_no_experiences_returns_empty_list(self):
         with self.app.app_context():
             self.assertEqual(get_experiences('홍길동'), [])
+
+
+class GetOutputsCaseTest(unittest.TestCase):
+    """자소서 결과물 목록은 지원 건 단위다 (2026-10-06 사용자 요청).
+
+    예전엔 outputs/[이름]/ 아래 .md 를 전부 평평하게 나열해서, 한 지원 건이 자소서·근거표·
+    이력서·포트폴리오까지 네댓 줄로 흩어졌다.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.root = self.tmp / 'root'
+        self.out = self.root / 'outputs' / '홍길동'
+        self.out.mkdir(parents=True)
+        self.app = create_app({'PROJECT_ROOT': self.root, 'TESTING': True})
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _case(self, folder, files):
+        d = self.out / folder
+        d.mkdir(parents=True, exist_ok=True)
+        for name, text in files.items():
+            (d / name).write_text(text, encoding='utf-8')
+        return d
+
+    def outputs(self):
+        with self.app.app_context():
+            return get_outputs('홍길동')
+
+    def test_one_row_per_case_folder(self):
+        self._case('가기업_물류', {'자소서.md': '초안', '근거표.md': '근거', '이력서.md': '이력'})
+        rows = self.outputs()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['title'], '가기업 · 물류')
+        self.assertTrue(rows[0]['has_draft'])
+        self.assertFalse(rows[0]['has_final'])
+        self.assertEqual(rows[0]['others'], 2)
+
+    def test_final_is_flagged(self):
+        self._case('가기업_물류', {'자소서.md': '초안', '최종본.md': '최종'})
+        self.assertTrue(self.outputs()[0]['has_final'])
+
+    def test_version_folder_is_not_a_case(self):
+        """lib/versions.py 는 '옛파일.md' 옆에 '옛파일/v1.md' 를 만든다. 이걸 건으로 세면
+        같은 문서가 목록에 두 번 뜬다."""
+        (self.out / '옛기업_직무.md').write_text('옛 평평한 구조', encoding='utf-8')
+        vdir = self.out / '옛기업_직무'
+        vdir.mkdir()
+        (vdir / 'v1.md').write_text('버전1', encoding='utf-8')
+
+        rows = self.outputs()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['folder'], '')
+        self.assertTrue(rows[0]['url'].startswith('/output/'))
+
+    def test_case_without_coverletter_still_listed(self):
+        """이력서만 만든 폴더도 빈칸으로 두지 않고 그 파일을 초안 자리에 보여준다."""
+        self._case('나기업_기획', {'이력서.md': '이력'})
+        rows = self.outputs()
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]['has_draft'])
+        self.assertEqual(rows[0]['others'], 0)
+
+    def test_empty_outputs_dir(self):
+        self.assertEqual(self.outputs(), [])

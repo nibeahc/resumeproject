@@ -1,0 +1,175 @@
+{% extends "base.html" %}
+{% block title %}{{ case.title }}{% endblock %}
+
+{% block content %}
+{# 사용자 요청(2026-10-06): "항목은 건별로 하나만 넣되, 한 페이지에 초안이 먼저 들어가고
+   최종본이 완성되면 아래에 최종본으로 기재". 그래서 이 화면이 지원 건의 입구다 — 폴더 안의
+   파일을 따로따로 여는 목록은 없앴고, 근거표 같은 부속 파일은 맨 아래로 내렸다. #}
+<style>
+  .muted { color:var(--ink-soft); }
+  .doc-head { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;
+              padding:12px 16px; border-bottom:1px solid var(--rule); background:var(--surface-sunk); }
+  .doc-head .meta { font-size:12px; color:var(--ink-soft); }
+  .doc-step { font-family:'Gowun Batang', serif; font-size:15px; font-weight:700; }
+  .doc-body { padding:24px; font-size:14px; }
+  .doc-body h1, .doc-body h2, .doc-body h3 { margin-top:18px; margin-bottom:8px; }
+  .doc-body h1:first-child, .doc-body h2:first-child { margin-top:0; }
+  .doc-body p { margin-bottom:10px; line-height:1.8; }
+  .doc-body ul, .doc-body ol { margin:0 0 10px 22px; line-height:1.8; }
+  .doc-body table { margin:0 0 12px; font-size:13px; }
+  .doc-body blockquote { border-left:3px solid var(--rule); padding-left:12px; color:var(--ink-soft);
+                         margin:0 0 10px; font-size:13px; }
+  .doc-body hr { border:none; border-top:1px solid var(--rule); margin:14px 0; }
+  .doc-edit { display:none; width:100%; min-height:520px; padding:20px; border:none; outline:none;
+              resize:vertical; background:var(--surface); color:var(--ink);
+              font-family:'IBM Plex Mono', ui-monospace, monospace; font-size:13px; line-height:1.7; }
+</style>
+
+<div style="margin-bottom:20px; font-size:13px; color:var(--ink-soft);">
+  <a href="/">홈</a>
+  <span style="margin:0 6px;">›</span>
+  <a href="/user/{{ user }}">{{ user }}</a>
+  <span style="margin:0 6px;">›</span>
+  자소서 결과물
+</div>
+
+<div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:20px;">
+  <h1 style="margin:0;">{{ case.title }}</h1>
+  {% if case.final %}
+  <span class="badge badge-ok">최종본 있음</span>
+  {% else %}
+  <span class="badge badge-warn">초안만 있음</span>
+  {% endif %}
+</div>
+
+<!-- ① 초안 — 생성기가 쓴 글. 여기서는 읽기만 하고, 고칠 땐 편집 화면으로 간다 -->
+<div class="card" style="padding:0; overflow:hidden;">
+  <div class="doc-head">
+    <div>
+      <span class="doc-step">① 초안</span>
+      {% if case.draft %}
+      <span class="meta mono" style="margin-left:8px;">{{ case.draft.name }} · {{ case.draft.chars }}자 · {{ case.draft.updated }}</span>
+      {% endif %}
+    </div>
+    {% if case.draft %}
+    <div style="display:flex; gap:8px;">
+      <a class="btn btn-secondary btn-sm" href="/output/{{ user }}/{{ case.draft.filename }}">편집 / 버전</a>
+      <a class="btn btn-secondary btn-sm" href="/output/{{ user }}/{{ case.draft.filename }}/docx">DOCX</a>
+    </div>
+    {% endif %}
+  </div>
+  {% if case.draft %}
+  <div class="doc-body" id="draftBody"></div>
+  {% else %}
+  <p class="empty" style="padding:20px;">초안이 없습니다. <a href="/generate/{{ user }}">자소서 작성하기 →</a></p>
+  {% endif %}
+</div>
+
+<!-- ② 최종본 — 사람이 확정한 글. 초안 아래에 온다 -->
+<div class="card" style="padding:0; overflow:hidden;">
+  <div class="doc-head">
+    <div>
+      <span class="doc-step">② 최종본</span>
+      {% if case.final %}
+      <span class="meta mono" style="margin-left:8px;">{{ case.final.name }} · {{ case.final.chars }}자 · {{ case.final.updated }}</span>
+      {% else %}
+      <span class="meta" style="margin-left:8px;">아직 없음</span>
+      {% endif %}
+    </div>
+    {% if case.final %}
+    <div style="display:flex; gap:8px;">
+      <button class="btn btn-secondary btn-sm" id="btnFinalPreview" onclick="setFinalMode('preview')">미리보기</button>
+      <button class="btn btn-secondary btn-sm" id="btnFinalEdit" onclick="setFinalMode('edit')">편집</button>
+      <a class="btn btn-secondary btn-sm" href="/output/{{ user }}/{{ case.final.filename }}/docx">DOCX</a>
+      <button class="btn btn-primary btn-sm" onclick="saveFinal()">저장</button>
+    </div>
+    {% endif %}
+  </div>
+  {% if case.final %}
+  <div class="doc-body" id="finalBody"></div>
+  <textarea class="doc-edit" id="finalEditor">{{ case.final.content }}</textarea>
+  {% else %}
+  <div style="padding:20px;">
+    <p class="empty" style="padding:0 0 14px;">
+      최종본이 완성되면 여기에 기재됩니다. 초안을 그대로 복사해서 퇴고를 시작하세요.
+    </p>
+    <button class="btn btn-primary btn-sm" id="btnMakeFinal" onclick="makeFinal()"
+            {% if not case.draft %}disabled{% endif %}>초안을 복사해 최종본 시작</button>
+  </div>
+  {% endif %}
+</div>
+
+{% if case.others %}
+<!-- 근거표·이력서·포트폴리오 등 부속 파일. 목록에는 올리지 않지만(사용자 요청) outputs/ 는
+     git 추적 대상이 아니라 화면에서 완전히 빼면 되찾을 경로가 없어진다. 그래서 여기 둔다. -->
+<div class="card">
+  <h2 style="margin-bottom:8px;">이 건의 다른 파일</h2>
+  <div style="font-size:13px; color:var(--ink-soft); display:flex; flex-direction:column; gap:4px;">
+    {% for f in case.others %}
+    <div><a href="/output/{{ user }}/{{ f.filename }}">{{ f.name }}</a> <span class="mono" style="font-size:11px;">· {{ f.updated }}</span></div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+<p style="font-size:12px; color:var(--ink-soft);">경로: outputs/{{ user }}/{{ case.folder }}/</p>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/markdown.js"></script>
+<script>
+{% if case.draft %}
+document.getElementById('draftBody').innerHTML = renderMarkdown({{ case.draft.content|tojson }});
+{% endif %}
+
+{% if case.final %}
+const FINAL_PATH = {{ case.final.filename|tojson }};
+
+function setFinalMode(mode) {
+  document.getElementById('finalBody').style.display   = mode === 'preview' ? '' : 'none';
+  document.getElementById('finalEditor').style.display = mode === 'edit'    ? '' : 'none';
+  document.getElementById('btnFinalPreview').style.background = mode === 'preview' ? 'var(--rule)' : '';
+  document.getElementById('btnFinalEdit').style.background    = mode === 'edit'    ? 'var(--rule)' : '';
+}
+
+function renderFinal(text) {
+  document.getElementById('finalBody').innerHTML = renderMarkdown(text);
+}
+
+// 저장은 기존 /output/.../save 를 그대로 쓴다 — 그래야 버전이 쌓인다 (S8-1).
+async function saveFinal() {
+  const content = document.getElementById('finalEditor').value;
+  const parts = FINAL_PATH.split('/').map(encodeURIComponent).join('/');
+  const res = await fetch(`/output/{{ user }}/${parts}/save`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({content}),
+  }).then(r => r.json()).catch(() => ({success: false}));
+
+  if (res.success) {
+    renderFinal(content);
+    setFinalMode('preview');
+    toast(res.version ? `저장 완료 (v${res.version})` : '저장 완료');
+  } else {
+    toast('저장 실패');
+  }
+}
+
+renderFinal({{ case.final.content|tojson }});
+setFinalMode('preview');
+{% else %}
+async function makeFinal() {
+  const btn = document.getElementById('btnMakeFinal');
+  btn.disabled = true;
+  const res = await fetch('/case/{{ user }}/{{ case.folder }}/final', {method: 'POST'})
+    .then(r => r.json()).catch(() => ({success: false, error: '요청 실패'}));
+  if (res.success) {
+    location.reload();
+  } else {
+    btn.disabled = false;
+    toast(res.error || '최종본을 만들지 못했습니다.');
+  }
+}
+{% endif %}
+</script>
+{% endblock %}

@@ -1,5 +1,7 @@
 """화면에 보여줄 데이터를 파일에서 읽는 헬퍼."""
 import re
+from datetime import datetime
+from urllib.parse import quote
 
 from lib import db
 from web.paths import output_dir, project_root, user_dir
@@ -39,20 +41,139 @@ def get_experiences(user):
     return result
 
 
+# 자소서 결과물 화면은 "지원 한 건 = 한 항목" 이다 (사용자 요청, 2026-10-06).
+# 예전엔 폴더 안의 .md 를 전부 평평하게 나열해서, 한 지원 건이 근거표·이력서·포트폴리오까지
+# 네댓 줄로 흩어졌다. 이제 폴더 하나를 한 줄로 접고, 그 안을 역할로 나눈다.
+#   초안   = 생성기가 쓴 글 (lib/coverletter.py 는 '자소서.md' 로 저장한다)
+#   최종본 = 사람이 확정한 글
+#   그 외  = 부속 파일(근거표·이력서·포트폴리오 등). 목록에는 올리지 않고 건 페이지
+#            맨 아래에서만 연다 — outputs/ 는 git 추적 대상이 아니라서, 화면에서
+#            아예 빼버리면 다시 찾아갈 경로가 없어진다.
+DRAFT_FILENAMES = ('자소서.md', '초안_AI.md', '초안.md')
+FINAL_FILENAME = '최종본.md'
+
+
+def _mtime(path):
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _is_version_dir(d):
+    """lib/versions.py 가 만든 버전 폴더('자소서/v1.md')인가.
+
+    형제에 같은 이름의 .md 가 있으면 버전 폴더다. 지원 건 폴더로 세면 안 된다 —
+    옛 평평한 구조('기업_직무.md')의 버전 폴더가 '기업_직무/' 라서 겉모습이 같다.
+    """
+    return (d.parent / f'{d.name}.md').exists()
+
+
+def _case_title(folder):
+    """'기업_직무' 를 되돌려 읽는다 (lib/resume._safe_folder_name 의 역방향)."""
+    company, sep, position = folder.partition('_')
+    return f'{company} · {position}' if sep and position else folder
+
+
+def _split_case_files(files):
+    """폴더 안의 .md 를 (초안, 최종본, 그 외) 로 나눈다."""
+    by_name = {f.name: f for f in files}
+    final = by_name.get(FINAL_FILENAME)
+    draft = next((by_name[n] for n in DRAFT_FILENAMES if n in by_name), None)
+    if draft is None and final is None and files:
+        # 초안도 최종본도 없는 폴더(이력서만 만든 건 등)는 가장 최근 파일을 초안 자리에 둔다.
+        # 빈 화면을 보여주느니 무엇이 들어 있는지는 보여준다.
+        draft = max(files, key=_mtime)
+    others = [f for f in files if f is not draft and f is not final]
+    return draft, final, others
+
+
+def _file_entry(base, path):
+    return {
+        'name': path.name,
+        # /output/<user>/<path:filename> 라우트에 그대로 붙일 수 있는 형태 (S11-5 와 같은 규약)
+        'filename': path.relative_to(base).as_posix(),
+        'updated': datetime.fromtimestamp(_mtime(path)).strftime('%Y-%m-%d %H:%M'),
+    }
+
+
+def build_case(user, folder):
+    """지원 건 하나의 화면 데이터. 초안과 최종본은 본문까지 읽는다 — 한 페이지에서
+    위에 초안, 아래에 최종본을 같이 보여주기 때문이다 (사용자 요청, 2026-10-06).
+
+    폴더가 없으면 None. 경로 안전성 검사는 호출하는 라우트(web.paths.safe_path)의 몫이다.
+    """
+    base = output_dir(user)
+    case_dir = base / folder
+    if not case_dir.is_dir():
+        return None
+    files = sorted(case_dir.glob('*.md'))
+    draft, final, others = _split_case_files(files)
+
+    def doc(path):
+        if path is None:
+            return None
+        entry = _file_entry(base, path)
+        entry['content'] = path.read_text(encoding='utf-8')
+        entry['chars'] = len(entry['content'])
+        return entry
+
+    return {
+        'folder': folder,
+        'title': _case_title(folder),
+        'draft': doc(draft),
+        'final': doc(final),
+        'others': [_file_entry(base, f) for f in others],
+        'final_filename': f'{folder}/{FINAL_FILENAME}',
+    }
+
+
 def get_outputs(user):
-    """outputs/[이름]/ 아래 결과물을 나열한다.
+    """outputs/[이름]/ 아래 결과물을 **지원 건 단위로** 나열한다 (한 건 = 한 항목).
 
     S1~S1-4 시절엔 outputs/[이름]/[기업]_[직무].md 처럼 평평하게 저장했다. S7(이력서/
     포트폴리오/자소서)부터는 outputs/[이름]/[기업]_[직무]/*.md 서브폴더에 모아 쌓는다
     (한 지원 건의 문서 3종이 한 폴더에 있어야 S7-3 일괄 생성이 자연스럽다). 두 형태가
-    실제로 공존할 수 있으므로(과거에 만든 파일이 남아있다) 둘 다 찾는다.
+    실제로 공존할 수 있으므로(과거에 만든 파일이 남아있다) 둘 다 찾되, 폴더는 한 줄로 접는다.
     """
     d = output_dir(user)
     if not d.exists():
         return []
-    files = list(d.glob('*.md')) + list(d.glob('*/*.md'))
-    files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
-    return [{'filename': f.relative_to(d).as_posix()} for f in files]
+
+    cases = []
+    for sub in sorted(d.iterdir()):
+        if not sub.is_dir() or _is_version_dir(sub):
+            continue
+        files = sorted(sub.glob('*.md'))
+        if not files:
+            continue
+        draft, final, others = _split_case_files(files)
+        updated = max(_mtime(f) for f in files)
+        cases.append({
+            'title': _case_title(sub.name),
+            'folder': sub.name,
+            'url': f'/case/{quote(user)}/{quote(sub.name)}',
+            'has_draft': draft is not None,
+            'has_final': final is not None,
+            'others': len(others),
+            'updated': datetime.fromtimestamp(updated).strftime('%Y-%m-%d'),
+            'mtime': updated,
+        })
+
+    for f in sorted(d.glob('*.md')):   # 옛 평평한 구조. 파일 하나가 곧 한 건이다
+        cases.append({
+            'title': _case_title(f.stem),
+            'folder': '',
+            'url': f'/output/{quote(user)}/{quote(f.name)}',
+            'has_draft': True,
+            'has_final': False,
+            'others': 0,
+            'updated': datetime.fromtimestamp(_mtime(f)).strftime('%Y-%m-%d'),
+            'mtime': _mtime(f),
+        })
+
+    cases.sort(key=lambda c: c['mtime'], reverse=True)
+    return cases
 
 
 def get_open_jobs(db_path=None):
