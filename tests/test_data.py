@@ -9,7 +9,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from web import create_app  # noqa: E402
-from web.data import _start_date_key, get_experiences, get_outputs  # noqa: E402
+from web.data import (MARK_CLOSE, MARK_OPEN, _start_date_key, build_case,  # noqa: E402
+                      get_experiences, get_outputs, mark_changes)
 
 
 def write_experience(exp_dir, filename, title, date):
@@ -62,12 +63,8 @@ class GetExperiencesOrderTest(unittest.TestCase):
             self.assertEqual(get_experiences('홍길동'), [])
 
 
-class GetOutputsCaseTest(unittest.TestCase):
-    """자소서 결과물 목록은 지원 건 단위다 (2026-10-06 사용자 요청).
-
-    예전엔 outputs/[이름]/ 아래 .md 를 전부 평평하게 나열해서, 한 지원 건이 자소서·근거표·
-    이력서·포트폴리오까지 네댓 줄로 흩어졌다.
-    """
+class CaseDirTestBase(unittest.TestCase):
+    """임시 outputs/홍길동/ 아래에 지원 건 폴더를 만든다."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -85,6 +82,14 @@ class GetOutputsCaseTest(unittest.TestCase):
         for name, text in files.items():
             (d / name).write_text(text, encoding='utf-8')
         return d
+
+
+class GetOutputsCaseTest(CaseDirTestBase):
+    """자소서 결과물 목록은 지원 건 단위다 (2026-10-06 사용자 요청).
+
+    예전엔 outputs/[이름]/ 아래 .md 를 전부 평평하게 나열해서, 한 지원 건이 자소서·근거표·
+    이력서·포트폴리오까지 네댓 줄로 흩어졌다.
+    """
 
     def outputs(self):
         with self.app.app_context():
@@ -126,3 +131,68 @@ class GetOutputsCaseTest(unittest.TestCase):
 
     def test_empty_outputs_dir(self):
         self.assertEqual(self.outputs(), [])
+
+
+class MarkChangesTest(unittest.TestCase):
+    """지난 버전에서 다음 버전에 고쳐진 부분 표시 (사용자 요청, 2026-10-12)."""
+
+    def test_deleted_word_is_marked(self):
+        marked, n = mark_changes('지난해 중소기업 실무자', '중소기업 실무자')
+        self.assertEqual(marked, f'{MARK_OPEN}지난해{MARK_CLOSE} 중소기업 실무자')
+        self.assertEqual(n, 1)
+
+    def test_adjacent_changed_words_are_one_span(self):
+        marked, n = mark_changes('가 나 다 라', '가 X Y 라')
+        self.assertEqual(marked, f'가 {MARK_OPEN}나 다{MARK_CLOSE} 라')
+        self.assertEqual(n, 1)
+
+    def test_identical_text_has_no_marks(self):
+        self.assertEqual(mark_changes('같은 글\n둘째 줄', '같은 글\n둘째 줄'), ('같은 글\n둘째 줄', 0))
+
+    def test_only_body_text_is_compared(self):
+        """머리말(인용), 제목, 글자수, 참조한 경험, 표는 바뀌어도 표시하지 않는다 (2026-10-12 사용자 요청)."""
+        old = ('# 회사 업무직원\n> 공고: 화물 관리\n## 지원동기\n글자수: 984자\n\n'
+               '본문 첫 문장입니다.\n\n---\n참조한 경험: 해커톤\n| 이름 | 홍길동 |\n**강점선택**: 책임감')
+        new = ('# 회사 (최종본)\n> 제출 양식: 이력서\n## 지원동기\n글자수: 1000자\n\n'
+               '본문 첫 문장입니다.\n\n---\n참조한 경험: 인턴\n| 이름 | 김철수 |\n**강점선택**: 성실함')
+        self.assertEqual(mark_changes(old, new), (old, 0))
+
+    def test_body_change_is_marked_even_when_moved_between_lines(self):
+        marked, n = mark_changes('## 문항\n글자수: 1자\n지난해 서비스를\n만들었습니다.',
+                                 '## 문항 (수정)\n서비스를 만들었습니다.')
+        self.assertEqual(marked, f'## 문항\n글자수: 1자\n{MARK_OPEN}지난해{MARK_CLOSE} 서비스를\n만들었습니다.')
+        self.assertEqual(n, 1)
+
+    def test_marks_never_cross_a_line(self):
+        marked, _ = mark_changes('가 나\n다 라', '마 바')
+        for line in marked.split('\n'):
+            self.assertEqual(line.count(MARK_OPEN), line.count(MARK_CLOSE))
+
+
+class CaseHistoryTest(CaseDirTestBase):
+    """건 페이지의 지난 버전: 초안부터 과거 → 최신, 같은 내용은 한 번만."""
+
+    def case(self, folder):
+        with self.app.app_context():
+            return build_case('홍길동', folder)
+
+    def test_versions_run_oldest_first_and_final_is_not_repeated(self):
+        d = self._case('가기업_물류', {'자소서.md': '셋째 초안', '최종본.md': '최종 원고'})
+        (d / '자소서').mkdir()
+        for i, text in enumerate(['첫째 초안', '둘째 초안', '셋째 초안'], 1):
+            (d / '자소서' / f'v{i}.md').write_text(text, encoding='utf-8')
+        (d / '최종본').mkdir()
+        (d / '최종본' / 'v1.md').write_text('셋째 초안', encoding='utf-8')   # 초안 복사본
+        (d / '최종본' / 'v2.md').write_text('최종 원고', encoding='utf-8')
+
+        history = self.case('가기업_물류')['history']
+        # 자소서.md 와 최종본/v1 은 바로 앞과 같은 글이라 빠지고, 최종본 자신은 맨 위 블록이다
+        self.assertEqual([h['label'] for h in history], ['초안 v1', '초안 v2', '최종본 v1'])
+        self.assertEqual(history[0]['content'], f'{MARK_OPEN}첫째{MARK_CLOSE} 초안')
+        self.assertEqual(history[-1]['content'], f'{MARK_OPEN}셋째 초안{MARK_CLOSE}')
+
+    def test_without_final_latest_draft_is_last_and_unmarked(self):
+        self._case('나기업_기획', {'자소서.md': '초안 본문'})
+        case = self.case('나기업_기획')
+        self.assertEqual([h['label'] for h in case['history']], ['초안'])
+        self.assertEqual(case['history'][0]['changes'], 0)

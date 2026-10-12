@@ -191,7 +191,8 @@ class CaseViewTest(WebTestBase):
     폴더 안의 파일을 전부 나열하던 때로 돌아가지 않게 여기서 못을 박는다.
     """
 
-    def test_case_page_shows_draft_then_final_slot(self):
+    def test_case_page_shows_final_slot_then_draft(self):
+        """2026-10-12 사용자 요청: 최종본이 맨 위 별도 블록, 그 아래로 지난 버전."""
         r = self.c.get('/case/홍길동/테스트기업_직무')
         self.assertEqual(r.status_code, 200)
         body = r.get_data(as_text=True)
@@ -200,7 +201,7 @@ class CaseViewTest(WebTestBase):
         self.assertIn(json.dumps('서브폴더 본문'), body)
         self.assertIn('자소서.md', body)
         self.assertIn('초안만 있음', body)
-        self.assertLess(body.index('① 초안'), body.index('② 최종본'))
+        self.assertLess(body.index('★ 최종본'), body.index('지난 버전'))
 
     def test_missing_case_returns_404(self):
         self.assertEqual(self.c.get('/case/홍길동/없는건').status_code, 404)
@@ -224,11 +225,15 @@ class CaseViewTest(WebTestBase):
         self.assertEqual(r.status_code, 400)
         self.assertFalse(r.get_json()['success'])
 
-    def test_final_shows_under_draft_once_written(self):
+    def test_final_on_top_and_draft_marked_where_final_changed_it(self):
+        """최종본이 위, 초안은 그 아래 지난 버전으로. 초안에서 최종본에 고쳐진 어절은 표시된다."""
         self.c.post('/case/홍길동/테스트기업_직무/final')
+        case_dir = self.root / 'outputs' / '홍길동' / '테스트기업_직무'
+        (case_dir / '최종본.md').write_text('서브폴더 원고', encoding='utf-8')
         body = self.c.get('/case/홍길동/테스트기업_직무').get_data(as_text=True)
         self.assertIn('최종본 있음', body)
-        self.assertLess(body.index('① 초안'), body.index('② 최종본'))
+        self.assertLess(body.index('★ 최종본'), body.index('지난 버전'))
+        self.assertIn(json.dumps('서브폴더 \ue000본문\ue001'), body)
 
     def test_outputs_tab_lists_one_row_per_case(self):
         """근거표 같은 부속 파일이 목록에 따로 뜨면 안 된다 (사용자 요청)."""

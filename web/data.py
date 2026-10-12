@@ -1,4 +1,5 @@
 """화면에 보여줄 데이터를 파일에서 읽는 헬퍼."""
+import difflib
 import re
 from datetime import datetime
 from urllib.parse import quote
@@ -97,9 +98,101 @@ def _file_entry(base, path):
     }
 
 
+# 지난 버전에서 "다음 버전에서 고쳐진 부분" 을 표시하는 기호 (사용자 요청, 2026-10-12).
+# 마크다운 원문에 끼워 넣고, 화면(case.html)이 렌더링한 뒤 빨간 볼드 태그로 바꾼다.
+# 사용자 문서에 나올 일이 없는 유니코드 사용자 영역 문자를 쓴다.
+MARK_OPEN, MARK_CLOSE = '\ue000', '\ue001'
+
+_WORD = re.compile(r'\S+')
+# 본문이 아닌 줄 — 비교하지도, 표시하지도 않는다 (사용자 요청, 2026-10-12: "공고·기업 정보 같은
+# 머리말, 참조한 경험, 글자수 등은 빼고 내용에만"). 제목, 인용(공고·마감 머리말), 구분선, 표,
+# '글자수: …' '참조한 경험: …' '작성일: …' '**강점선택**: …' 같은 '항목: 값' 줄.
+_META_LINE = re.compile(r'^\s*(#|>|\||-{3,}\s*$|\**[가-힣A-Za-z][가-힣A-Za-z ]{0,11}\**\s*[:：])')
+
+
+def _content_words(text):
+    """본문 줄의 어절만 (줄 번호, 시작, 끝) 과 함께 뽑는다."""
+    words = []
+    for ln, line in enumerate(text.split('\n')):
+        if not line.strip() or _META_LINE.match(line):
+            continue
+        words.extend((ln, m.start(), m.end(), m.group()) for m in _WORD.finditer(line))
+    return words
+
+
+def mark_changes(old, new):
+    """old 에서 new 로 넘어가며 고쳐지거나 지워진 본문을 MARK_OPEN/CLOSE 로 감싼 old 를 돌려준다.
+
+    띄어쓰기 단위(어절)로 비교한다 — 글자 단위는 조사 하나 바뀐 데도 조각조각 칠해져 읽기 어렵다.
+    본문 줄끼리만 비교하므로 머리말·글자수·참조한 경험은 바뀌어도 표시되지 않는다.
+    줄바꿈 위치가 달라진 것도 수정으로 치지 않는다. 표시는 줄을 넘지 않는다(렌더러가 줄 단위로
+    읽는다). 바뀐 곳 수(표시 덩어리 수)도 함께 돌려준다.
+    """
+    a, b = _content_words(old), _content_words(new)
+    changed = set()
+    sm = difflib.SequenceMatcher(None, [w[3] for w in a], [w[3] for w in b], autojunk=False)
+    for tag, i1, i2, _, _ in sm.get_opcodes():
+        if tag in ('replace', 'delete'):
+            changed.update(range(i1, i2))
+
+    # 줄마다, 바뀐 어절이 연달아 있으면 사이 공백까지 한 덩어리로 감싼다
+    spans = {}   # 줄 번호 -> [(시작, 끝)]
+    for i in sorted(changed):
+        ln, st, en, _ = a[i]
+        line_spans = spans.setdefault(ln, [])
+        if line_spans and i - 1 in changed and a[i - 1][0] == ln:
+            line_spans[-1] = (line_spans[-1][0], en)
+        else:
+            line_spans.append((st, en))
+
+    lines = old.split('\n')
+    for ln, line_spans in spans.items():
+        line = lines[ln]
+        for st, en in reversed(line_spans):
+            line = line[:st] + MARK_OPEN + line[st:en] + MARK_CLOSE + line[en:]
+        lines[ln] = line
+    return '\n'.join(lines), sum(len(v) for v in spans.values())
+
+
+def _version_files(vdir):
+    """'자소서/' 같은 버전 폴더의 v1.md, v2.md ... 를 번호순으로."""
+    if not vdir.is_dir():
+        return []
+    found = [(int(m.group(1)), f) for f in vdir.glob('v*.md')
+             for m in [re.match(r'^v(\d+)\.md$', f.name)] if m]
+    return [f for _, f in sorted(found)]
+
+
+def _history_chain(draft, final):
+    """과거 → 최신 순서의 문서 이력. 맨 끝이 지금 화면 맨 위에 뜨는 글(최종본, 없으면 초안)이다.
+
+    초안 버전들(자소서/v1..) → 초안 파일 → 최종본 버전들(최종본/v1..) → 최종본 파일.
+    save_version 은 파일과 마지막 버전을 같은 내용으로 남기고, 최종본 v1 은 초안을 그대로
+    복사한 것이라, 바로 앞과 내용이 같은 항목은 빼서 같은 글이 두 번 뜨지 않게 한다.
+    """
+    chain = []
+    for doc, label in ((draft, '초안'), (final, '최종본')):
+        if doc is None:
+            continue
+        for f in _version_files(doc.parent / doc.stem):
+            chain.append((f, f'{label} {f.stem}'))
+        chain.append((doc, label))
+
+    items = []
+    for path, label in chain:
+        content = path.read_text(encoding='utf-8')
+        if items and items[-1]['raw'] == content:
+            items[-1] = {**items[-1], 'path': path, 'label': label}   # 같은 글이면 최신 이름으로
+            continue
+        items.append({'path': path, 'label': label, 'raw': content})
+    return items
+
+
 def build_case(user, folder):
-    """지원 건 하나의 화면 데이터. 초안과 최종본은 본문까지 읽는다 — 한 페이지에서
-    위에 초안, 아래에 최종본을 같이 보여주기 때문이다 (사용자 요청, 2026-10-06).
+    """지원 건 하나의 화면 데이터 (사용자 요청 2026-10-06, 2026-10-12).
+
+    맨 위에 최종본을 따로 띄우고, 그 아래로 초안부터 과거 → 최신 순서로 지난 버전을 깐다.
+    지난 버전마다 바로 다음 버전에서 고쳐진 부분을 표시해 둔다 ('history').
 
     폴더가 없으면 None. 경로 안전성 검사는 호출하는 라우트(web.paths.safe_path)의 몫이다.
     """
@@ -118,11 +211,24 @@ def build_case(user, folder):
         entry['chars'] = len(entry['content'])
         return entry
 
+    chain = _history_chain(draft, final)
+    # 최종본이 있으면 체인의 마지막(=최종본)은 맨 위 블록이 따로 보여주므로 이력에서 뺀다.
+    # 최종본이 없으면 체인 전체가 이력이고, 마지막 항목(가장 최근 초안)은 비교할 다음 버전이 없다.
+    past = chain[:-1] if final is not None else chain
+    history = []
+    for i, item in enumerate(past):
+        nxt = chain[i + 1]['raw'] if i + 1 < len(chain) else None
+        marked, n = mark_changes(item['raw'], nxt) if nxt is not None else (item['raw'], 0)
+        entry = _file_entry(base, item['path'])
+        entry.update(label=item['label'], content=marked, chars=len(item['raw']), changes=n)
+        history.append(entry)
+
     return {
         'folder': folder,
         'title': _case_title(folder),
         'draft': doc(draft),
         'final': doc(final),
+        'history': history,
         'others': [_file_entry(base, f) for f in others],
         'final_filename': f'{folder}/{FINAL_FILENAME}',
     }
