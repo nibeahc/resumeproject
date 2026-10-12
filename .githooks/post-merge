@@ -1,3 +1,5 @@
 #!/bin/bash
 # pull/merge 직후 점검 및 자동 복구
 bash "$(git rev-parse --show-toplevel)/scripts/repo-health.sh"
+# pull 로 받은 자소서·경험 DB 도 공개용 폴더에 복사한다
+bash "$(git rev-parse --show-toplevel)/scripts/sync-personal-data.sh"

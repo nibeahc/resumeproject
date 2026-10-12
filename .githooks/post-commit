@@ -1,0 +1,3 @@
+#!/bin/bash
+# 커밋 직후 자소서·경험 DB 를 공개용 폴더(대시보드가 읽는 곳)에 복사한다
+bash "$(git rev-parse --show-toplevel)/scripts/sync-personal-data.sh"
