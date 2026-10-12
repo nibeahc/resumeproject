@@ -202,3 +202,31 @@ git fsck 무결성, iCloud evict 여부, 개인정보 추적 여부, 워킹 트�
 `BLOCKED_HOSTS` 에 근거 문구와 함께 적어두고 받기 전에 막는다 (현재 잡코리아, 사람인,
 원티드, 인크루트). robots.txt, 사설망 주소, 요청 간격도 거기서 처리한다.
 **목록을 돌며 수집하는 기능은 만들지 않는다** — "허가되지 않은 반복·대량 수집" 이다.
+
+---
+
+## 레포 구조: resumeproject (공개용) / resumeproject-private (2026-10-12 추가)
+
+이 레포(`resumeproject`, iCloud Drive 안, `~/Documents/DIVE/Claude CLI/ResumeProject`)는
+**개인정보를 절대 추적하지 않는 공개용**이다. `users/`, `outputs/`, `companies/*.md` 는
+`.gitignore` 로 막혀 있고, `scripts/repo-health.sh` [5/6] 이 매 커밋 전 이를 검사한다.
+
+실제 작업(자소서 작성 등 `users/` 데이터가 필요한 모든 작업)과 **Claude Code cloud
+세션은 여기서 하지 않는다.** 대신:
+
+- **`resumeproject-private`** — `~/Documents/Github/resumeproject-private/` (iCloud 밖),
+  private GitHub 레포 `nibeahc/resumeproject-private`. 코드 + `users/`·`outputs/`·
+  `companies/` 개인정보를 전부 포함하는 진짜 작업본. `claude --cloud` 는 **이 폴더에서**
+  실행한다. 이 폴더의 `.gitignore`/`scripts/repo-health.sh` 는 개인정보 추적을 의도적으로
+  허용하도록 공개용과 다르게 수정되어 있다 (대신 `.env`, `data/`, `jobs/` 는 여전히 막음)
+- **코드 변경을 공개 레포에 반영**: `resumeproject-private/scripts/export-public.sh` 실행
+  → 개인정보·비밀키 제외하고 코드만 이 레포(`resumeproject`)로 복사 → `git status` 로 diff
+  확인 후 수동으로 커밋/push. 자동 스케줄 없음, 요청 시에만 실행
+- 반대 방향(공개 → private) 동기화 스크립트는 없다. 공개 레포에서 직접 코드를 고치면
+  수동으로 `resumeproject-private` 에도 반영해야 한다 — 가능하면 **private 쪽에서 작업하고
+  export 하는 방향을 기본으로** 쓴다
+
+왜 두 레포인가: `resumeproject` 를 나중에 공개/공유할 계획이 있어서, 개인정보가 git
+히스토리에 한 번도 섞이지 않게 원천 분리했다. `claude --cloud` 는 레포 하나만 클론하기
+때문에, 코드와 개인정보를 둘 다 봐야 하는 작업은 반드시 `resumeproject-private` 기준으로
+돌려야 한다.
