@@ -23,11 +23,14 @@ echo "private → public 코드 동기화 중..."
 # .gitignore 와 scripts/repo-health.sh 는 레포마다 다르게 유지해야 한다 —
 # 공개 레포 쪽은 users/outputs/companies/data/jobs 를 막는 원본 버전을 그대로
 # 둬야 하므로, 여기서 덮어쓰지 않는다.
+# Claude.md 도 마찬가지다 — 레포 구조 절이 레포마다 다르다("이 레포는 작업용" vs
+# "이 레포는 공개용"). 공통 규칙을 고쳤다면 공개 레포 쪽 Claude.md 에 손으로 옮긴다.
 # --delete 는 쓰지 않는다 (공개 레포에서 파일이 자동으로 지워지는 걸 막기 위해).
 # private 에서 파일을 지운 경우, 공개 레포에서 git rm 을 수동으로 해야 한다.
 rsync -a \
   --exclude='.git/' \
   --exclude='.gitignore' \
+  --exclude='Claude.md' \
   --exclude='scripts/repo-health.sh' \
   --exclude='.env' --exclude='.env.example' \
   --exclude='users/' --exclude='outputs/' --exclude='companies/' \

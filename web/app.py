@@ -10,4 +10,7 @@ from web import create_app  # noqa: E402
 app = create_app()
 
 if __name__ == '__main__':
-    app.run(debug=False, port=8080)
+    # 코드·템플릿이 바뀌면 서버가 알아서 다시 읽는다 (사용자 요청, 2026-10-12).
+    # debug=True 는 쓰지 않는다 — 브라우저에서 코드를 실행할 수 있는 디버거가 같이 켜진다 (S0-2).
+    app.config['TEMPLATES_AUTO_RELOAD'] = True
+    app.run(debug=False, use_reloader=True, port=8080)

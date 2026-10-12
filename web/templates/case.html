@@ -2,9 +2,11 @@
 {% block title %}{{ case.title }}{% endblock %}
 
 {% block content %}
-{# 사용자 요청(2026-10-06): "항목은 건별로 하나만 넣되, 한 페이지에 초안이 먼저 들어가고
-   최종본이 완성되면 아래에 최종본으로 기재". 그래서 이 화면이 지원 건의 입구다 — 폴더 안의
-   파일을 따로따로 여는 목록은 없앴고, 근거표 같은 부속 파일은 맨 아래로 내렸다. #}
+{# 사용자 요청(2026-10-06): "항목은 건별로 하나만". 그래서 이 화면이 지원 건의 입구다 — 폴더
+   안의 파일을 따로따로 여는 목록은 없앴고, 근거표 같은 부속 파일은 맨 아래로 내렸다.
+   사용자 요청(2026-10-12): 최종본은 맨 위 별도 블록, 그 아래로 초안부터 과거 → 최신 순서로
+   지난 버전을 깔고, 각 버전에서 다음 버전에 고쳐진 부분은 빨간 볼드로. 가장 최근 지난 버전
+   하나만 펼친다. #}
 <style>
   .muted { color:var(--ink-soft); }
   .doc-head { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;
@@ -23,6 +25,17 @@
   .doc-edit { display:none; width:100%; min-height:520px; padding:20px; border:none; outline:none;
               resize:vertical; background:var(--surface); color:var(--ink);
               font-family:'IBM Plex Mono', ui-monospace, monospace; font-size:13px; line-height:1.7; }
+  .final-card { border:2px solid var(--accent); }
+  .final-card .doc-head { background:var(--accent-soft); }
+  .history-title { margin:28px 0 10px; font-size:15px; }
+  .history-item summary { list-style:none; cursor:pointer; }
+  .history-item summary::-webkit-details-marker { display:none; }
+  .history-item summary .doc-step::before { content:'▸ '; color:var(--ink-faint); }
+  .history-item[open] summary .doc-step::before { content:'▾ '; }
+  .history-item:not([open]) .doc-head { border-bottom:none; }
+  .doc-body .chg { color:#C62828; font-weight:700; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .doc-body .chg { color:#FF7A7A; } }
+  :root[data-theme="dark"] .doc-body .chg { color:#FF7A7A; }
 </style>
 
 <div style="margin-bottom:20px; font-size:13px; color:var(--ink-soft);">
@@ -42,34 +55,11 @@
   {% endif %}
 </div>
 
-<!-- ① 초안 — 생성기가 쓴 글. 여기서는 읽기만 하고, 고칠 땐 편집 화면으로 간다 -->
-<div class="card" style="padding:0; overflow:hidden;">
+<!-- 최종본 — 사람이 확정한 글. 맨 위 별도 블록 -->
+<div class="card final-card" style="padding:0; overflow:hidden;">
   <div class="doc-head">
     <div>
-      <span class="doc-step">① 초안</span>
-      {% if case.draft %}
-      <span class="meta mono" style="margin-left:8px;">{{ case.draft.name }} · {{ case.draft.chars }}자 · {{ case.draft.updated }}</span>
-      {% endif %}
-    </div>
-    {% if case.draft %}
-    <div style="display:flex; gap:8px;">
-      <a class="btn btn-secondary btn-sm" href="/output/{{ user }}/{{ case.draft.filename }}">편집 / 버전</a>
-      <a class="btn btn-secondary btn-sm" href="/output/{{ user }}/{{ case.draft.filename }}/docx">DOCX</a>
-    </div>
-    {% endif %}
-  </div>
-  {% if case.draft %}
-  <div class="doc-body" id="draftBody"></div>
-  {% else %}
-  <p class="empty" style="padding:20px;">초안이 없습니다. <a href="/generate/{{ user }}">자소서 작성하기 →</a></p>
-  {% endif %}
-</div>
-
-<!-- ② 최종본 — 사람이 확정한 글. 초안 아래에 온다 -->
-<div class="card" style="padding:0; overflow:hidden;">
-  <div class="doc-head">
-    <div>
-      <span class="doc-step">② 최종본</span>
+      <span class="doc-step">★ 최종본</span>
       {% if case.final %}
       <span class="meta mono" style="margin-left:8px;">{{ case.final.name }} · {{ case.final.chars }}자 · {{ case.final.updated }}</span>
       {% else %}
@@ -99,6 +89,35 @@
   {% endif %}
 </div>
 
+<!-- 지난 버전 — 초안부터 과거 → 최신. 다음 버전에서 고쳐진 부분은 빨간 볼드 -->
+{% if case.history %}
+<h2 class="history-title">지난 버전 <span class="meta" style="font-size:12px; font-weight:400;">· 과거 → 최신 · <span style="color:#C62828; font-weight:700;">빨간 볼드</span> = 다음 버전에서 고쳐진 부분</span></h2>
+{% for h in case.history %}
+<details class="card history-item" style="padding:0; overflow:hidden;"{% if loop.last %} open{% endif %}>
+  <summary class="doc-head">
+    <div>
+      <span class="doc-step">{{ h.label }}</span>
+      <span class="meta mono" style="margin-left:8px;">{{ h.name }} · {{ h.chars }}자 · {{ h.updated }}</span>
+      {% if h.changes %}
+      <span class="badge badge-warn" style="margin-left:8px;">다음 버전에서 {{ h.changes }}곳 수정</span>
+      {% elif loop.last and not case.final %}
+      <span class="meta" style="margin-left:8px;">가장 최근 초안</span>
+      {% endif %}
+    </div>
+    {% if case.draft and h.filename == case.draft.filename %}
+    <div style="display:flex; gap:8px;">
+      <a class="btn btn-secondary btn-sm" href="/output/{{ user }}/{{ case.draft.filename }}">편집 / 버전</a>
+      <a class="btn btn-secondary btn-sm" href="/output/{{ user }}/{{ case.draft.filename }}/docx">DOCX</a>
+    </div>
+    {% endif %}
+  </summary>
+  <div class="doc-body history-body" data-idx="{{ loop.index0 }}"></div>
+</details>
+{% endfor %}
+{% elif not case.final %}
+<p class="empty" style="padding:20px;">초안이 없습니다. <a href="/generate/{{ user }}">자소서 작성하기 →</a></p>
+{% endif %}
+
 {% if case.others %}
 <!-- 근거표·이력서·포트폴리오 등 부속 파일. 목록에는 올리지 않지만(사용자 요청) outputs/ 는
      git 추적 대상이 아니라 화면에서 완전히 빼면 되찾을 경로가 없어진다. 그래서 여기 둔다. -->
@@ -118,9 +137,13 @@
 {% block scripts %}
 <script src="/static/markdown.js"></script>
 <script>
-{% if case.draft %}
-document.getElementById('draftBody').innerHTML = renderMarkdown({{ case.draft.content|tojson }});
-{% endif %}
+// 지난 버전: 서버가 고쳐진 부분을 \ue000 … \ue001 로 감싸 보낸다 (web/data.py mark_changes).
+// 렌더링한 뒤 그 기호를 빨간 볼드 태그로 바꾼다 — 렌더러가 HTML 을 이스케이프하므로 기호는 그대로 남는다.
+const HISTORY = {{ case.history|map(attribute='content')|list|tojson }};
+document.querySelectorAll('.history-body').forEach(el => {
+  el.innerHTML = renderMarkdown(HISTORY[+el.dataset.idx])
+    .replace(/\ue000/g, '<strong class="chg">').replace(/\ue001/g, '</strong>');
+});
 
 {% if case.final %}
 const FINAL_PATH = {{ case.final.filename|tojson }};
